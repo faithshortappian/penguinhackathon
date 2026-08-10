@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Appian Expression Analyzer</title>
+  <link rel="stylesheet" href="panel.css" />
+</head>
+<body>
+  <header class="header">
+    <h1>Expression Analyzer</h1>
+    <span class="status-dot" id="statusDot" title="Waiting for expression"></span>
+  </header>
+
+  <main>
+    <!-- Summary Section -->
+    <section class="section" id="summarySection">
+      <h2>Summary</h2>
+      <p class="summary-text" id="summaryText">
+        Open an expression in Appian's Expression Builder to begin analysis.
+      </p>
+    </section>
+
+    <!-- Diagnostics Section -->
+    <section class="section" id="diagnosticsSection">
+      <h2>
+        Issues
+        <span class="badge" id="issueCount">0</span>
+      </h2>
+      <div class="diagnostics-list" id="diagnosticsList">
+        <p class="empty-state">No issues detected.</p>
+      </div>
+    </section>
+
+    <!-- Details Section -->
+    <section class="section" id="detailsSection">
+      <h2>Details</h2>
+      <div class="detail-group">
+        <h3>Functions Used</h3>
+        <ul class="tag-list" id="functionsList"></ul>
+      </div>
+      <div class="detail-group">
+        <h3>Variables Referenced</h3>
+        <ul class="tag-list" id="variablesList"></ul>
+      </div>
+    </section>
+
+    <!-- Manual Input Section -->
+    <section class="section">
+      <h2>Manual Input</h2>
+      <p class="hint">Paste a SAIL expression below to analyze it directly:</p>
+      <textarea
+        id="manualInput"
+        placeholder="a!localVariables(&#10;  local!items: {1, 2, 3},&#10;  ...&#10;)"
+        rows="8"
+      ></textarea>
+      <button class="btn" id="analyzeBtn">Analyze</button>
+    </section>
+  </main>
+
+  <script type="module" src="panel.js"></script>
+</body>
+</html>
