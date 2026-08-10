@@ -1,0 +1,37 @@
+/* Inline badge indicator for the expression editor */
+.appian-analyzer-badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  z-index: 9999;
+  cursor: pointer;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+.appian-analyzer-badge.no-errors {
+  background-color: #d4edda;
+  color: #155724;
+  border: 1px solid #c3e6cb;
+}
+
+.appian-analyzer-badge.has-errors {
+  background-color: #f8d7da;
+  color: #721c24;
+  border: 1px solid #f5c6cb;
+}
+
+/* Underline highlights for errors in the editor */
+.appian-analyzer-error-highlight {
+  text-decoration: wavy underline #dc3545;
+  text-decoration-skip-ink: none;
+}
+
+.appian-analyzer-warning-highlight {
+  text-decoration: wavy underline #ffc107;
+  text-decoration-skip-ink: none;
+}

@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Appian Expression Analyzer",
+  "version": "0.1.0",
+  "description": "Analyzes Appian SAIL expressions in the Expression Builder for syntax errors and provides plain-English explanations.",
+  "permissions": ["activeTab", "sidePanel", "storage"],
+  "host_permissions": ["https://*.appiancloud.com/*", "http://localhost:*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.appiancloud.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "side_panel": {
+    "default_path": "panel/panel.html"
+  },
+  "action": {
+    "default_title": "Appian Expression Analyzer"
+  }
+}
