@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "appian-parser"
+version = "1.0.0"
+description = "Standalone Appian package parser library"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+include = ["appian_parser*"]
+
+[project.scripts]
+appian-parser = "appian_parser.cli:main"
+
+[project.optional-dependencies]
+mcp = ["mcp[cli]"]
+
+# ── MCP Server package ──────────────────────────────────────────────────
+# Install with: pip install gam-appian-kb
+# Or from git: pip install "gam-appian-kb @ git+https://github.com/myorg/gam-appian-kb.git"
+# See mcp_server/pyproject.toml

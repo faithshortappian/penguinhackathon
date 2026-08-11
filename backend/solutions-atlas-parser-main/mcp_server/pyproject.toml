@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "appian-atlas"
+version = "1.0.0"
+description = "MCP server for Appian application knowledge base"
+requires-python = ">=3.10"
+dependencies = ["mcp[cli]"]
+
+[project.scripts]
+appian-atlas = "mcp_server.server:main"
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["mcp_server*"]
