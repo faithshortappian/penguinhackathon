@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>editor-bridge test — CodeMirror 6</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; max-width: 700px; }
+    #editor { border: 1px solid #ccc; }
+    button { margin-right: 8px; margin-top: 10px; padding: 6px 12px; }
+    #out { white-space: pre-wrap; background: #f4f4f4; padding: 10px; margin-top: 10px; font-family: monospace; }
+  </style>
+</head>
+<body>
+  <h2>editor-bridge.js — CodeMirror 6 harness</h2>
+  <div id="editor"></div>
+
+  <div>
+    <button id="readBtn">Read State</button>
+    <button id="writeBtn">Apply Test Edit</button>
+  </div>
+  <pre id="out">(click a button)</pre>
+
+  <script type="module">
+    // NOTE: the "codemirror" meta-package (which re-exports basicSetup)
+    // resolves oddly through esm.sh — its default export comes back as
+    // CodeMirror 5's legacy API instead of CM6 exports. Pulling the
+    // individual @codemirror/* packages directly avoids that.
+    import { EditorView, keymap } from "https://esm.sh/@codemirror/view@6";
+    import { EditorState } from "https://esm.sh/@codemirror/state@6";
+    import { defaultKeymap } from "https://esm.sh/@codemirror/commands@6";
+    import { locateEditorRoot, readState, applyEdit } from "../content/editor-bridge.js";
+
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: "a!localVariables(\n  local!x: 1,\n  local!x\n)",
+        extensions: [keymap.of(defaultKeymap)],
+      }),
+      parent: document.getElementById("editor"),
+    });
+    window.__cmView = view; // debugging hook only
+
+    const out = document.getElementById("out");
+
+    document.getElementById("readBtn").onclick = () => {
+      const root = locateEditorRoot();
+      const state = readState(root);
+      out.textContent = JSON.stringify(state, null, 2) + "\n\n(select some text in the editor, then click again to see selectedText)";
+    };
+
+    document.getElementById("writeBtn").onclick = async () => {
+      const root = locateEditorRoot();
+      const ok = await applyEdit(root, "a!isNullOrEmpty(ri!employee.name)");
+      out.textContent = "applyEdit returned: " + ok + "\n\nview.state.doc.toString() now:\n" + view.state.doc.toString();
+    };
+  </script>
+</body>
+</html>

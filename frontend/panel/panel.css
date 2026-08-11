@@ -237,3 +237,182 @@ textarea:focus {
 .detail-group {
   margin-bottom: 4px;
 }
+
+/* Mode toggle */
+.mode-toggle {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.mode-btn {
+  flex: 1;
+  padding: 6px 10px;
+  background: #e9ecef;
+  color: #495057;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mode-btn.active {
+  background: #2c3e50;
+  color: white;
+}
+
+.mode-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Diff cards */
+.diff-card {
+  border: 1px solid #dee2e6;
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 10px;
+  background: white;
+}
+
+.diff-card.diff-resolved {
+  opacity: 0.6;
+}
+
+.diff-old,
+.diff-new {
+  font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 6px 8px;
+  border-radius: 4px;
+  margin-bottom: 4px;
+}
+
+.diff-old {
+  background: #fff5f5;
+  color: #721c24;
+  text-decoration: line-through;
+}
+
+.diff-new {
+  background: #f0fdf4;
+  color: #14532d;
+}
+
+.diff-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.btn-accept,
+.btn-reject {
+  margin-top: 0;
+  flex: 1;
+  text-align: center;
+}
+
+.btn-accept {
+  background: #16a34a;
+}
+
+.btn-accept:hover {
+  background: #15803d;
+}
+
+.btn-reject {
+  background: #6c757d;
+}
+
+.btn-reject:hover {
+  background: #5a6268;
+}
+
+/* Rule input grid */
+.ri-grid-wrap {
+  overflow-x: auto; /* safety net if the panel is ever narrower than this */
+  margin-bottom: 8px;
+}
+
+.ri-grid {
+  width: 100%;
+  table-layout: fixed; /* column widths below win over content size */
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.ri-grid th,
+.ri-grid td {
+  border: 1px solid #dee2e6;
+  padding: 4px 5px;
+  text-align: left;
+  vertical-align: top;
+  word-break: break-word;
+}
+
+.ri-grid th {
+  background: #f1f3f5;
+  font-weight: 600;
+}
+
+/* Name and Type share the remaining space; the rest are fixed-width. */
+.ri-grid col.ri-col-desc {
+  width: 44px;
+}
+
+.ri-grid col.ri-col-array {
+  width: 32px;
+}
+
+.ri-grid col.ri-col-actions {
+  width: 62px;
+}
+
+.ri-array-cell {
+  text-align: center;
+  padding-left: 2px;
+  padding-right: 2px;
+}
+
+.ri-fill-note {
+  font-size: 10px;
+  color: #16a34a;
+}
+
+.ri-fill-note.ri-fill-error {
+  color: #dc2626;
+}
+
+.ri-desc-cell {
+  text-align: center;
+  padding-left: 2px;
+  padding-right: 2px;
+}
+
+.ri-copy-btn {
+  margin: 0;
+  padding: 2px 4px;
+  font-size: 10px;
+  background: #6c757d;
+  width: 100%;
+}
+
+.ri-copy-btn:hover {
+  background: #5a6268;
+}
+
+.ri-actions-cell {
+  padding-left: 2px;
+  padding-right: 2px;
+}
+
+.ri-actions-cell .btn {
+  display: block;
+  width: 100%;
+  margin: 0 0 2px 0;
+  padding: 2px 4px;
+  font-size: 10px;
+}

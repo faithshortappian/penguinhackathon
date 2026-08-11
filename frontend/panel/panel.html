@@ -3,58 +3,70 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Appian Expression Analyzer</title>
+  <title>Appian AI Assistant</title>
   <link rel="stylesheet" href="panel.css" />
 </head>
 <body>
   <header class="header">
-    <h1>Expression Analyzer</h1>
-    <span class="status-dot" id="statusDot" title="Waiting for expression"></span>
+    <h1>Appian AI Assistant</h1>
+    <span class="status-dot" id="statusDot" title="Idle"></span>
   </header>
 
   <main>
-    <!-- Summary Section -->
-    <section class="section" id="summarySection">
-      <h2>Summary</h2>
-      <p class="summary-text" id="summaryText">
-        Open an expression in Appian's Expression Builder to begin analysis.
-      </p>
-    </section>
-
-    <!-- Diagnostics Section -->
-    <section class="section" id="diagnosticsSection">
-      <h2>
-        Issues
-        <span class="badge" id="issueCount">0</span>
-      </h2>
-      <div class="diagnostics-list" id="diagnosticsList">
-        <p class="empty-state">No issues detected.</p>
-      </div>
-    </section>
-
-    <!-- Details Section -->
-    <section class="section" id="detailsSection">
-      <h2>Details</h2>
-      <div class="detail-group">
-        <h3>Functions Used</h3>
-        <ul class="tag-list" id="functionsList"></ul>
-      </div>
-      <div class="detail-group">
-        <h3>Variables Referenced</h3>
-        <ul class="tag-list" id="variablesList"></ul>
-      </div>
-    </section>
-
-    <!-- Manual Input Section -->
+    <!-- Prompt -->
     <section class="section">
-      <h2>Manual Input</h2>
-      <p class="hint">Paste a SAIL expression below to analyze it directly:</p>
-      <textarea
-        id="manualInput"
-        placeholder="a!localVariables(&#10;  local!items: {1, 2, 3},&#10;  ...&#10;)"
-        rows="8"
-      ></textarea>
-      <button class="btn" id="analyzeBtn">Analyze</button>
+      <h2>Ask AI</h2>
+      <p class="hint" id="objectNameHint">Open an expression rule in Appian to begin.</p>
+      <textarea id="promptInput" rows="3" placeholder="e.g. add a null check for the employee input"></textarea>
+      <button class="btn" id="askBtn">Ask AI</button>
+      <p class="hint" id="askStatus"></p>
+    </section>
+
+    <!-- Suggestion (hidden until a response arrives) -->
+    <section class="section" id="suggestionSection" hidden>
+      <h2>Suggestion</h2>
+      <p class="summary-text" id="suggestionResponse"></p>
+
+      <div class="mode-toggle" id="modeToggle">
+        <button class="mode-btn active" data-mode="bulk" id="bulkModeBtn">Bulk</button>
+        <button class="mode-btn" data-mode="line" id="lineModeBtn">Line by line</button>
+      </div>
+
+      <div id="editsContainer"></div>
+    </section>
+
+    <!-- Rule input changes (hidden until a response with rule_input arrives) -->
+    <section class="section" id="ruleInputSection" hidden>
+      <h2>Rule Input Changes</h2>
+      <p class="hint">
+        Only the Name is ever written automatically — Type and Array proved unreliable to
+        automate, so use this grid as your reference and set those two by hand in Appian.
+      </p>
+
+      <div class="mode-toggle" id="riModeToggle">
+        <button class="mode-btn" data-ri-mode="manual" id="riManualModeBtn">Manual</button>
+        <button class="mode-btn active" data-ri-mode="auto" id="riAutoModeBtn">Auto (Accept fills names)</button>
+      </div>
+
+      <div id="riGridContainer"></div>
+    </section>
+
+    <!-- Debug: exact JSON sent to the backend and kept in panel state -->
+    <section class="section" id="debugSection">
+      <h2>Debug: Request / Response JSON</h2>
+      <p class="hint">Request sent to background.js (REQUEST_SUGGESTION payload):</p>
+      <pre id="debugRequest" style="white-space: pre-wrap; font-size: 11px;">(none yet)</pre>
+      <p class="hint">Response kept in panel state (state.suggestion):</p>
+      <pre id="debugResponse" style="white-space: pre-wrap; font-size: 11px;">(none yet)</pre>
+    </section>
+
+    <!-- Dev Test: exercises the real chrome.debugger write path directly -->
+    <section class="section" id="devTestSection">
+      <h2>Dev Test: Apply Edit</h2>
+      <p class="hint">Sends text to the active tab's expression editor via simulated keystrokes.</p>
+      <textarea id="testEditInput" rows="3" placeholder="a!isNullOrEmpty(ri!employee)"></textarea>
+      <button class="btn" id="testEditBtn">Send Test Edit</button>
+      <pre id="testEditResult" style="white-space: pre-wrap; font-size: 12px;"></pre>
     </section>
   </main>
 

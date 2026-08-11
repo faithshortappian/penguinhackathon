@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>editor-bridge test — CodeMirror 5</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css" />
+  <style>
+    body { font-family: sans-serif; padding: 20px; max-width: 700px; }
+    .CodeMirror { border: 1px solid #ccc; height: auto; }
+    button { margin-right: 8px; margin-top: 10px; padding: 6px 12px; }
+    #out { white-space: pre-wrap; background: #f4f4f4; padding: 10px; margin-top: 10px; font-family: monospace; }
+  </style>
+</head>
+<body>
+  <h2>editor-bridge.js — CodeMirror 5 harness</h2>
+  <textarea id="editor">a!localVariables(
+  local!x: 1,
+  local!x
+)</textarea>
+
+  <div>
+    <button id="readBtn">Read State</button>
+    <button id="writeBtn">Apply Test Edit</button>
+  </div>
+  <pre id="out">(click a button)</pre>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+  <script type="module">
+    import { locateEditorRoot, readState, applyEdit } from "../content/editor-bridge.js";
+
+    const cm = CodeMirror.fromTextArea(document.getElementById("editor"), {
+      lineNumbers: true,
+      mode: "javascript",
+    });
+    // Select part of "local!x" on the last line to exercise selection reading.
+    cm.setSelection({ line: 2, ch: 2 }, { line: 2, ch: 9 });
+
+    const out = document.getElementById("out");
+
+    document.getElementById("readBtn").onclick = () => {
+      const root = locateEditorRoot();
+      const state = readState(root);
+      out.textContent = JSON.stringify(state, null, 2);
+    };
+
+    document.getElementById("writeBtn").onclick = async () => {
+      const root = locateEditorRoot();
+      const ok = await applyEdit(root, "a!isNullOrEmpty(ri!employee.name)");
+      out.textContent = "applyEdit returned: " + ok + "\n\ncm.getValue() now:\n" + cm.getValue();
+    };
+  </script>
+</body>
+</html>
