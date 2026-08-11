@@ -203,6 +203,20 @@ export async function applyRangeEditViaKeystrokes(ranges, text) {
 }
 
 /**
+ * Like applyRangeEditViaKeystrokes, but each range carries its own text
+ * ({ from, to, text }) instead of sharing one. Used by the parenthesis
+ * auto-repair, which mixes deletions and insertions of different
+ * characters in a single pass.
+ */
+export async function applyMixedRangeEditsViaKeystrokes(edits) {
+  const response = await chrome.runtime.sendMessage({
+    type: "APPLY_MIXED_RANGE_EDITS_VIA_KEYSTROKES",
+    edits,
+  });
+  return response ?? { success: false, error: "No response from background script" };
+}
+
+/**
  * Direct-API write, used only by the standalone test harnesses
  * (frontend/test/*.html), which run in the page's own main world where
  * `element.CodeMirror` is genuinely reachable. Not usable from the real

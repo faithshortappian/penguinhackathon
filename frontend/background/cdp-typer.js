@@ -16,6 +16,12 @@
  * content script is reachable, but we've been burned enough times in
  * this codebase by "reachable but not actually trusted" to just use
  * the same CDP mechanism uniformly rather than assume it's fine.
+ *
+ * Confirmed live that this extends even to a *real*, CDP-dispatched
+ * Cmd/Ctrl+V (trusted, not execCommand('paste')): still didn't register
+ * with Appian's dirty-tracking. So large writes have to go through
+ * character-by-character typing (replaceAllText) — there's no faster
+ * paste-based shortcut available here.
  */
 
 const PROTOCOL_VERSION = "1.3";
@@ -46,6 +52,20 @@ async function withDebugger(tabId, fn) {
 }
 
 /**
+ * A CDP command resolving just means the browser process accepted and
+ * dispatched the input event — not that the renderer has finished
+ * processing it into CodeMirror's document model. Callers that read the
+ * editor's value back (readExpressionValue) right after a typing
+ * operation completes can otherwise catch it mid-flight and see stale,
+ * pre-edit text. Used once at the end of each exported typing function
+ * below, not per-character or per-edit, so it adds one short pause per
+ * operation rather than compounding across a batch.
+ */
+function settle() {
+  return new Promise((resolve) => setTimeout(resolve, 150));
+}
+
+/**
  * Toggles CodeMirror 5's autoCloseBrackets option via Runtime.evaluate.
  * Confirmed live: typing a full replacement string character-by-character
  * (as replaceAllText below does) triggers Appian's own auto-close-bracket
@@ -67,6 +87,47 @@ async function setAutoCloseBrackets(tabId, enabled) {
 }
 
 /**
+ * Toggles CodeMirror 5's Enter handling via its extraKeys option.
+ * Confirmed live: simulating a literal Enter keystroke doesn't just
+ * insert "\n" — CodeMirror's default keymap binds Enter to its own
+ * "newlineAndIndent" command, which inserts a newline PLUS whatever
+ * indentation it guesses is correct for that point. Since the text
+ * we're typing already contains its own correct leading whitespace for
+ * every line, that auto-indent stacks on top of it, leaving extra tabs
+ * before each line. Setting extraKeys: { Enter: false } tells
+ * CodeMirror's keymap system to explicitly not handle Enter at all,
+ * which lets it fall through to the underlying textarea's native
+ * behavior — a plain, un-indented newline — for the duration of the
+ * simulated typing. Restored afterward so the user's own typing in
+ * Appian keeps its normal auto-indent.
+ */
+async function setEnterAutoIndent(tabId, enabled) {
+  await sendCommand(tabId, "Runtime.evaluate", {
+    expression: `(function() {
+      var root = ${EXPRESSION_EDITOR_SELECTOR_JS};
+      if (!root || !root.CodeMirror) return true;
+      var cm = root.CodeMirror;
+      if (${enabled}) {
+        if (window.__appianAiOrigExtraKeys !== undefined) {
+          cm.setOption("extraKeys", window.__appianAiOrigExtraKeys);
+          window.__appianAiOrigExtraKeys = undefined;
+        }
+      } else {
+        if (window.__appianAiOrigExtraKeys === undefined) {
+          window.__appianAiOrigExtraKeys = cm.getOption("extraKeys") || {};
+        }
+        var keys = {};
+        for (var k in window.__appianAiOrigExtraKeys) keys[k] = window.__appianAiOrigExtraKeys[k];
+        keys.Enter = false;
+        cm.setOption("extraKeys", keys);
+      }
+      return true;
+    })()`,
+    returnByValue: true,
+  });
+}
+
+/**
  * Dispatches a real select-all combo (Cmd+A on Mac, Ctrl+A elsewhere).
  * Used instead of an editor's own JS "select all" API because content
  * scripts can't reach page-created JS objects like a CodeMirror 5
@@ -80,21 +141,79 @@ async function selectAll(tabId) {
   await sendCommand(tabId, "Input.dispatchKeyEvent", { type: "keyUp", ...params });
 }
 
+/**
+ * Dispatches one character's keyDown+keyUp. The two are fired together
+ * (not awaiting keyDown's ack before sending keyUp) rather than fully
+ * sequential — a small, safe speedup, since both events belong to the
+ * same character and their relative order to each other is preserved
+ * by chrome.debugger's ordered connection regardless of whether we wait
+ * in between. Callers still await this whole function, one character at
+ * a time, before moving to the next.
+ *
+ * A prior version of this file tried removing ALL waiting — firing
+ * every character's events for an entire string in one burst before
+ * awaiting anything. That's the wrong tradeoff: confirmed live it
+ * caused newlines to get dropped or coalesced in longer expressions
+ * (everything landing on one line), almost certainly because the
+ * renderer couldn't reliably keep up with Enter's actual line-break
+ * DOM mutation while a flood of subsequent characters' events were
+ * already in flight targeting positions that didn't exist yet. Waiting
+ * for one full character (both its events) before starting the next
+ * keeps every structural change — especially newlines — fully
+ * committed before anything after it is dispatched.
+ */
 async function dispatchChar(tabId, char) {
   const special = SPECIAL_KEYS[char];
-  if (special) {
-    await sendCommand(tabId, "Input.dispatchKeyEvent", { type: "keyDown", ...special });
-    await sendCommand(tabId, "Input.dispatchKeyEvent", { type: "keyUp", ...special });
-    return;
-  }
+  const down = special ? { type: "keyDown", ...special } : { type: "keyDown", key: char, text: char, unmodifiedText: char };
+  const up = special ? { type: "keyUp", ...special } : { type: "keyUp", key: char };
+  await Promise.all([
+    sendCommand(tabId, "Input.dispatchKeyEvent", down),
+    sendCommand(tabId, "Input.dispatchKeyEvent", up),
+  ]);
+}
 
-  await sendCommand(tabId, "Input.dispatchKeyEvent", {
-    type: "keyDown",
-    key: char,
-    text: char,
-    unmodifiedText: char,
-  });
-  await sendCommand(tabId, "Input.dispatchKeyEvent", { type: "keyUp", key: char });
+/**
+ * Fires an entire line's worth of character events in one burst,
+ * awaiting them all together — safe to pipeline because none of them
+ * are structural: unlike Enter, plain characters don't create new DOM
+ * nodes for CodeMirror to render, so there's nothing for a flood of
+ * them to outrun.
+ */
+async function dispatchLineFast(tabId, lineText) {
+  const pending = [];
+  for (const char of lineText) {
+    const special = SPECIAL_KEYS[char];
+    const down = special ? { type: "keyDown", ...special } : { type: "keyDown", key: char, text: char, unmodifiedText: char };
+    const up = special ? { type: "keyUp", ...special } : { type: "keyUp", key: char };
+    pending.push(sendCommand(tabId, "Input.dispatchKeyEvent", down));
+    pending.push(sendCommand(tabId, "Input.dispatchKeyEvent", up));
+  }
+  await Promise.all(pending);
+}
+
+/**
+ * Types `text`, pipelining each line's plain characters together (fast)
+ * but dispatching every newline on its own, fully awaited, before
+ * moving on to the next line — the newline is the one character that
+ * triggers a structural DOM change (a new rendered line), which is
+ * exactly what broke when the whole string was pipelined without any
+ * serialization at all (see dispatchChar's header). This keeps that one
+ * risk contained to just the Enter keystrokes while still getting most
+ * of the speed benefit back for everything else.
+ *
+ * Leading whitespace is stripped from every line before typing — by
+ * design, not a bug: indentation isn't something this extension tries
+ * to get right, since Appian has its own auto-format button for that.
+ * A newline just starts a new line, with nothing in front of it;
+ * combined with setEnterAutoIndent suppressing CodeMirror's own
+ * indent-on-Enter, the typed result never has any indentation at all.
+ */
+async function dispatchText(tabId, text) {
+  const lines = text.split("\n").map((line) => line.replace(/^[ \t]+/, ""));
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].length > 0) await dispatchLineFast(tabId, lines[i]);
+    if (i < lines.length - 1) await dispatchChar(tabId, "\n");
+  }
 }
 
 async function dispatchClick(tabId, x, y) {
@@ -188,12 +307,13 @@ export async function typeText(tabId, text) {
 export async function replaceAllText(tabId, text) {
   return withDebugger(tabId, async () => {
     await setAutoCloseBrackets(tabId, false);
+    await setEnterAutoIndent(tabId, false);
     try {
       await selectAll(tabId);
-      for (const char of text) {
-        await dispatchChar(tabId, char);
-      }
+      await dispatchText(tabId, text);
+      await settle();
     } finally {
+      await setEnterAutoIndent(tabId, true);
       await setAutoCloseBrackets(tabId, true);
     }
   });
@@ -233,23 +353,61 @@ function selectRangeScript(fromLine, fromCh, toLine, toCh) {
  * out from under us, so no re-reading/re-indexing is needed between
  * edits in the same call.
  */
+async function applyOneRangeEdit(tabId, range, text) {
+  const response = await sendCommand(tabId, "Runtime.evaluate", {
+    expression: selectRangeScript(range.from.line, range.from.ch, range.to.line, range.to.ch),
+    returnByValue: true,
+  });
+  if (!response.result?.value) {
+    throw new Error("Could not select the target text in the editor");
+  }
+  if (text.length === 0) {
+    // A selection alone doesn't delete anything — a real Backspace
+    // does, consistent with this file only ever mutating the document
+    // via genuine keystrokes rather than a JS API call.
+    const params = { key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 };
+    await sendCommand(tabId, "Input.dispatchKeyEvent", { type: "rawKeyDown", ...params });
+    await sendCommand(tabId, "Input.dispatchKeyEvent", { type: "keyUp", ...params });
+  } else {
+    await dispatchText(tabId, text);
+  }
+}
+
 export async function replaceRangesText(tabId, ranges, text) {
   return withDebugger(tabId, async () => {
     await setAutoCloseBrackets(tabId, false);
+    await setEnterAutoIndent(tabId, false);
     try {
       for (const range of ranges) {
-        const response = await sendCommand(tabId, "Runtime.evaluate", {
-          expression: selectRangeScript(range.from.line, range.from.ch, range.to.line, range.to.ch),
-          returnByValue: true,
-        });
-        if (!response.result?.value) {
-          throw new Error("Could not select the target text in the editor");
-        }
-        for (const char of text) {
-          await dispatchChar(tabId, char);
-        }
+        await applyOneRangeEdit(tabId, range, text);
       }
+      await settle();
     } finally {
+      await setEnterAutoIndent(tabId, true);
+      await setAutoCloseBrackets(tabId, true);
+    }
+  });
+}
+
+/**
+ * Like replaceRangesText, but each range carries its own replacement
+ * text instead of all sharing one — used by the parenthesis auto-repair
+ * (see panel.js computeBracketRepairPlan), which mixes deletions (extra
+ * closers) and insertions (missing closers) of different characters in
+ * a single pass. Ranges must still be given in descending document
+ * order for the same reason as replaceRangesText.
+ */
+export async function applyMixedRangeEdits(tabId, edits) {
+  return withDebugger(tabId, async () => {
+    await setAutoCloseBrackets(tabId, false);
+    await setEnterAutoIndent(tabId, false);
+    try {
+      for (const edit of edits) {
+        await applyOneRangeEdit(tabId, edit, edit.text);
+      }
+      await settle();
+    } finally {
+      await setEnterAutoIndent(tabId, true);
       await setAutoCloseBrackets(tabId, true);
     }
   });

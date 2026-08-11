@@ -34,7 +34,133 @@
  * clicks Appian's own Save button).
  */
 
-import { Analyzer } from "../parser/analyzer.js";
+import { Tokenizer, TokenType } from "../parser/tokenizer.js";
+
+// ─── Line-by-line diff synthesis ───────────────────────────────────
+//
+// The real backend (see background.js requestSuggestion) only ever
+// returns a single full-replacement `code` string — it has no concept
+// of a per-line diff, so line_by_line_edit always comes back empty and
+// Line-by-line mode has nothing to show. computeLineDiff fills that gap
+// on the frontend: a standard LCS-based line diff between the old
+// expression and the new bulk_edit, producing hunks in the same shape
+// the rest of this file already expects ({ old, new }), but ALSO
+// carrying precise character offsets (atIndex/deleteCount/insertText/
+// expectedText) so each hunk can be applied via the same precise
+// range-edit mechanism built for the parenthesis fixer
+// (APPLY_MULTI_CHAR_EDITS) rather than the older, less reliable
+// substring search (APPLY_LINE_EDIT), which could misfire if the same
+// line of text happens to appear more than once in the expression.
+function computeLineDiff(oldText, newText) {
+  if (oldText === newText) return [];
+
+  // dispatchText (cdp-typer.js) strips leading whitespace from every
+  // line as it types — indentation is left entirely to Appian's own
+  // auto-format button, not tracked here at all. So the diff has to
+  // compare lines ignoring indentation too: without this, re-running
+  // the diff after accepting a hunk would keep seeing that now-
+  // unindented live line as "different" from the (still indented) raw
+  // target line forever, and the hunk would never actually disappear.
+  const stripIndent = (line) => line.replace(/^[ \t]+/, "");
+
+  const oldLines = oldText.split("\n"); // raw — real offsets/expectedText need the real text
+  const newLines = newText.split("\n").map(stripIndent); // pre-stripped — this is what actually gets typed
+  const oldLinesNorm = oldLines.map(stripIndent); // used only for equality checks below
+  const n = oldLines.length;
+  const m = newLines.length;
+
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = oldLinesNorm[i] === newLines[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+
+  const ops = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (oldLinesNorm[i] === newLines[j]) {
+      ops.push({ type: "equal" });
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      ops.push({ type: "delete", line: oldLines[i] });
+      i++;
+    } else {
+      ops.push({ type: "insert", line: newLines[j] });
+      j++;
+    }
+  }
+  while (i < n) {
+    ops.push({ type: "delete", line: oldLines[i] });
+    i++;
+  }
+  while (j < m) {
+    ops.push({ type: "insert", line: newLines[j] });
+    j++;
+  }
+
+  // Character offset where each old line begins, plus a sentinel entry
+  // one past the last line (used for hunks that reach the end of doc).
+  const oldLineStart = [];
+  let acc = 0;
+  for (const line of oldLines) {
+    oldLineStart.push(acc);
+    acc += line.length + 1;
+  }
+  oldLineStart.push(acc);
+
+  const hunks = [];
+  let k = 0;
+  let oldLineIndex = 0;
+  while (k < ops.length) {
+    if (ops[k].type === "equal") {
+      oldLineIndex++;
+      k++;
+      continue;
+    }
+
+    const startLine = oldLineIndex;
+    const deleted = [];
+    const inserted = [];
+    while (k < ops.length && ops[k].type !== "equal") {
+      if (ops[k].type === "delete") {
+        deleted.push(ops[k].line);
+        oldLineIndex++;
+      } else {
+        inserted.push(ops[k].line);
+      }
+      k++;
+    }
+
+    const atEnd = startLine >= n;
+    const startIndex = atEnd ? oldText.length : oldLineStart[startLine];
+    const endLine = startLine + deleted.length;
+    const endIndex = deleted.length === 0 ? startIndex : endLine < n ? oldLineStart[endLine] : oldText.length;
+
+    let insertText = inserted.join("\n");
+    if (deleted.length === 0 && inserted.length > 0) {
+      // Pure insertion — anchor as its own new line rather than merging
+      // into whatever's already sitting at this position.
+      insertText = atEnd ? "\n" + insertText : insertText + "\n";
+    }
+
+    hunks.push({
+      old: deleted.map(stripIndent).join("\n"),
+      new: inserted.join("\n"), // already stripped — newLines was pre-stripped above
+      line: startLine + 1,
+      atIndex: startIndex,
+      deleteCount: endIndex - startIndex,
+      insertText,
+      // Raw, unstripped — must match the live document's actual text
+      // exactly for the staleness check in APPLY_MULTI_CHAR_EDITS.
+      expectedText: oldText.slice(startIndex, endIndex),
+    });
+  }
+
+  return hunks;
+}
 
 // ─── State ──────────────────────────────────────────────────────────
 
@@ -45,6 +171,7 @@ const state = {
   suggestion: null, // { response, rule_input, bulk_edit, line_by_line_edit }
   mode: "bulk", // expression edit mode: "bulk" | "line"
   lineStatus: [], // per line_by_line_edit entry: "pending" | "accepted" | "rejected"
+  lineNavIndex: 0, // which line_by_line_edit entry ▲/▼ navigation currently points at
   ruleInputMode: "auto", // rule input mode: "manual" | "auto"
   ruleInputAutomationSupported: true, // false in editors other than the Expression Rule Designer
   ruleInputStatus: [], // per rule_input entry, auto mode only: "pending" | "accepted" | "error" | "rejected"
@@ -160,10 +287,22 @@ askBtn.addEventListener("click", async () => {
     }
 
     state.suggestion = response.data;
+
+    // The real backend never produces a line-by-line diff of its own
+    // (see computeLineDiff's header) — synthesize one from bulk_edit
+    // whenever the backend left it empty, so Line-by-line mode has
+    // something to show instead of just disappearing.
+    const hasBackendLineEdits =
+      Array.isArray(state.suggestion.line_by_line_edit) && state.suggestion.line_by_line_edit.length > 0;
+    if (!hasBackendLineEdits && state.suggestion.bulk_edit) {
+      state.suggestion.line_by_line_edit = computeLineDiff(state.expression, state.suggestion.bulk_edit);
+    }
+
     debugResponse.textContent = JSON.stringify(state.suggestion, null, 2);
 
     state.mode = "bulk";
     state.lineStatus = (state.suggestion.line_by_line_edit || []).map(() => "pending");
+    state.lineNavIndex = 0;
     state.ruleInputStatus = (state.suggestion.rule_input || []).map(() => "pending");
 
     askStatus.textContent = "";
@@ -222,6 +361,7 @@ lineModeBtn.addEventListener("click", () => {
   if (lineModeBtn.disabled) return;
   state.mode = "line";
   renderSuggestion();
+  highlightCurrentLineEdit();
 });
 
 function renderBulkEdit() {
@@ -250,13 +390,29 @@ function renderBulkEdit() {
   });
 }
 
+// ▲/▼ step between line_by_line_edit entries the same way Find &
+// Replace's match navigation does, highlighting each edit's location in
+// the editor (via a search for edit.old's text) before you accept it —
+// so you can see exactly what's about to change, one at a time.
 function renderLineEdits() {
   const edits = state.suggestion.line_by_line_edit;
-  editsContainer.innerHTML = edits
+  if (state.lineNavIndex >= edits.length) state.lineNavIndex = 0;
+
+  const navHtml =
+    edits.length > 1
+      ? `<div class="fr-nav">
+           <button class="btn fr-nav-btn" id="lineNavPrevBtn" title="Previous edit">&#9650;</button>
+           <span class="hint">Edit ${state.lineNavIndex + 1} of ${edits.length}</span>
+           <button class="btn fr-nav-btn" id="lineNavNextBtn" title="Next edit">&#9660;</button>
+         </div>`
+      : "";
+
+  const cardsHtml = edits
     .map((edit, i) => {
       const status = state.lineStatus[i];
+      const isCurrent = i === state.lineNavIndex ? " diff-current" : "";
       return `
-        <div class="diff-card ${status !== "pending" ? "diff-resolved" : ""}" data-index="${i}">
+        <div class="diff-card ${status !== "pending" ? "diff-resolved" : ""}${isCurrent}" data-index="${i}">
           <div class="diff-old">${escapeHtml(edit.old)}</div>
           <div class="diff-new">${escapeHtml(edit.new)}</div>
           ${
@@ -272,6 +428,13 @@ function renderLineEdits() {
     })
     .join("");
 
+  editsContainer.innerHTML = navHtml + cardsHtml;
+
+  if (edits.length > 1) {
+    document.getElementById("lineNavPrevBtn").addEventListener("click", () => navigateLineEdit(-1));
+    document.getElementById("lineNavNextBtn").addEventListener("click", () => navigateLineEdit(1));
+  }
+
   editsContainer.querySelectorAll("[data-action]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const i = Number(btn.dataset.index);
@@ -285,6 +448,36 @@ function renderLineEdits() {
       }
 
       btn.disabled = true;
+
+      if (edit.atIndex !== undefined) {
+        // computeLineDiff hunks' offsets are all computed once against
+        // the expression as it stood before ANY hunk was applied — the
+        // moment one gets accepted, every hunk that comes after it in
+        // the document has a stale atIndex, which is exactly what threw
+        // "expression changed since the check ran" on the second Accept.
+        // Same fix as the parenthesis checker: after applying, recompute
+        // the whole diff fresh against the live document instead of
+        // trying to patch up stale offsets — a hunk that's now fully
+        // applied simply won't show up in the new diff at all.
+        const result = await sendToContentScript("APPLY_MULTI_CHAR_EDITS", { edits: [edit] });
+        if (!result.success) {
+          alert("Error applying edit: " + result.error); // eslint-disable-line no-alert
+          renderLineEdits();
+          return;
+        }
+        await refreshEditorState();
+        state.suggestion.line_by_line_edit = state.suggestion.bulk_edit
+          ? computeLineDiff(state.expression, state.suggestion.bulk_edit)
+          : [];
+        state.lineStatus = state.suggestion.line_by_line_edit.map(() => "pending");
+        state.lineNavIndex = 0;
+        renderSuggestion();
+        await highlightCurrentLineEdit();
+        return;
+      }
+
+      // Legacy path — a real backend-provided { old, new } diff with no
+      // precomputed offsets, applied via substring search.
       const result = await sendToContentScript("APPLY_LINE_EDIT", { old: edit.old, new: edit.new });
       if (result.success) {
         state.lineStatus[i] = "accepted";
@@ -295,6 +488,40 @@ function renderLineEdits() {
       renderLineEdits();
     });
   });
+}
+
+async function navigateLineEdit(delta) {
+  const edits = state.suggestion.line_by_line_edit;
+  state.lineNavIndex = (state.lineNavIndex + delta + edits.length) % edits.length;
+  renderLineEdits();
+  editsContainer
+    .querySelector(`[data-index="${state.lineNavIndex}"]`)
+    ?.scrollIntoView({ behavior: "smooth", block: "center" });
+  await highlightCurrentLineEdit();
+}
+
+async function highlightCurrentLineEdit() {
+  if (state.mode !== "line") return;
+  const edits = state.suggestion?.line_by_line_edit;
+
+  if (!edits || !edits.length) {
+    // Nothing left to point at — clear the highlight rather than
+    // leaving a stale one sitting on whatever line was highlighted
+    // before the last hunk got accepted (which is what made it look
+    // like accepting hadn't done anything).
+    await sendToContentScript("CLEAR_HIGHLIGHT");
+    return;
+  }
+
+  const edit = edits[state.lineNavIndex];
+  // computeLineDiff hunks carry an exact line number; fall back to a
+  // text search only for edits that don't (e.g. a real line-by-line
+  // diff a future backend might send with just { old, new }).
+  if (edit.line != null) {
+    await sendToContentScript("HIGHLIGHT_LINE", { line: edit.line });
+  } else {
+    await sendToContentScript("HIGHLIGHT_TEXT_LOCATION", { text: edit.old });
+  }
 }
 
 // ─── Rendering: rule input changes (grid + per-row Accept in bulk mode) ─
@@ -614,55 +841,225 @@ frReplaceAllBtn.addEventListener("click", async () => {
 
 // ─── Static Tools: Parenthesis Checker ─────────────────────────────
 
+// Click-through navigator over a computed *repair plan* rather than raw
+// bracket-matching diagnostics. The old approach (Analyzer's
+// checkBracketMatching) reported every downstream mismatch as its own
+// diagnostic, so a single missing "(" near the top of an expression
+// cascaded into a wrong diagnosis for every closer after it — e.g.
+// deleting 2 real extra characters could still leave 8 diagnostics
+// because the rest were never separate problems, just fallout from the
+// same one. computeBracketRepairPlan below instead greedily determines
+// the minimal set of concrete edits (delete this extra closer / insert
+// this closer here / insert this closer at the end) that makes the
+// whole expression balanced, so the issue count directly reflects the
+// number of real fixes needed and shrinks exactly in step with them.
+const OPENER_TYPES = new Set([TokenType.OPEN_PAREN, TokenType.OPEN_BRACKET, TokenType.OPEN_BRACE]);
+const CLOSER_TYPES = new Set([TokenType.CLOSE_PAREN, TokenType.CLOSE_BRACKET, TokenType.CLOSE_BRACE]);
+const CLOSE_TYPE_FOR_OPEN = {
+  [TokenType.OPEN_PAREN]: TokenType.CLOSE_PAREN,
+  [TokenType.OPEN_BRACKET]: TokenType.CLOSE_BRACKET,
+  [TokenType.OPEN_BRACE]: TokenType.CLOSE_BRACE,
+};
+const CHAR_FOR_CLOSE_TYPE = {
+  [TokenType.CLOSE_PAREN]: ")",
+  [TokenType.CLOSE_BRACKET]: "]",
+  [TokenType.CLOSE_BRACE]: "}",
+};
+
+function computeBracketRepairPlan(tokens) {
+  const stack = [];
+  const raw = [];
+
+  for (const token of tokens) {
+    if (OPENER_TYPES.has(token.type)) {
+      stack.push(token);
+    } else if (CLOSER_TYPES.has(token.type)) {
+      // Anything mismatched on top of the stack is greedily treated as
+      // unclosed and given its missing closer right before this token,
+      // then we re-check this token against what's left underneath.
+      while (stack.length && CLOSE_TYPE_FOR_OPEN[stack[stack.length - 1].type] !== token.type) {
+        const opener = stack.pop();
+        raw.push({
+          atIndex: token.startIndex,
+          deleteCount: 0,
+          insertText: CHAR_FOR_CLOSE_TYPE[CLOSE_TYPE_FOR_OPEN[opener.type]],
+          line: token.line,
+        });
+      }
+      if (stack.length) {
+        stack.pop();
+      } else {
+        raw.push({
+          atIndex: token.startIndex,
+          deleteCount: token.value.length,
+          insertText: "",
+          expectedText: token.value,
+          line: token.line,
+        });
+      }
+    }
+  }
+
+  // Anything still open at the end needs closing, innermost (most
+  // recently opened) first.
+  while (stack.length) {
+    const opener = stack.pop();
+    raw.push({
+      atEnd: true,
+      deleteCount: 0,
+      insertText: CHAR_FOR_CLOSE_TYPE[CLOSE_TYPE_FOR_OPEN[opener.type]],
+      line: null,
+    });
+  }
+
+  // Merge pure insertions that land at the exact same position (e.g.
+  // several unclosed openers all needing to close at the end) into one
+  // edit, concatenating in the order generated above — which is already
+  // correct nesting order — so they can't get typed out of order by
+  // being applied as separate, position-shifting edits.
+  const merged = [];
+  const insertIndexByKey = new Map();
+  for (const edit of raw) {
+    const isPureInsert = edit.deleteCount === 0 && edit.expectedText === undefined;
+    if (isPureInsert) {
+      const key = edit.atEnd ? "end" : `i:${edit.atIndex}`;
+      if (insertIndexByKey.has(key)) {
+        merged[insertIndexByKey.get(key)].insertText += edit.insertText;
+        continue;
+      }
+      insertIndexByKey.set(key, merged.length);
+    }
+    merged.push({ ...edit });
+  }
+
+  return merged;
+}
+
+function describeParenEdit(edit) {
+  if (edit.deleteCount > 0) {
+    return { text: `Extra "${edit.expectedText}" — no matching opener.`, action: "Delete this character" };
+  }
+  if (edit.atEnd) {
+    return {
+      text: `Missing "${edit.insertText}" — expression ends before it's closed.`,
+      action: `Add "${edit.insertText}" at the end of the expression`,
+    };
+  }
+  return {
+    text: `Missing "${edit.insertText}" before this point.`,
+    action: `Insert "${edit.insertText}" here`,
+  };
+}
+
+let parenPlan = [];
+let parenIndex = -1;
+let parenTotalLines = 1;
+
+async function runParenCheck() {
+  const { expression } = await refreshEditorState();
+  if (!expression || !expression.trim()) {
+    parenResults.innerHTML = '<p class="empty-state">Expression is empty.</p>';
+    parenPlan = [];
+    parenIndex = -1;
+    if (parenHighlightCheckbox.checked) await sendToContentScript("CLEAR_HIGHLIGHT");
+    return;
+  }
+
+  parenTotalLines = expression.split("\n").length;
+  const tokens = new Tokenizer(expression).tokenize();
+  parenPlan = computeBracketRepairPlan(tokens);
+
+  if (parenPlan.length === 0) {
+    parenResults.innerHTML = '<p class="empty-state">All parentheses/brackets/braces are matched.</p>';
+    parenIndex = -1;
+    if (parenHighlightCheckbox.checked) await sendToContentScript("CLEAR_HIGHLIGHT");
+    return;
+  }
+
+  if (parenIndex < 0 || parenIndex >= parenPlan.length) parenIndex = 0;
+  renderParenNav();
+  if (parenHighlightCheckbox.checked) await highlightCurrentParenIssue();
+}
+
 parenCheckBtn.addEventListener("click", async () => {
   parenResults.innerHTML = '<p class="hint">Checking...</p>';
   try {
-    const { expression } = await refreshEditorState();
-    if (!expression || !expression.trim()) {
-      parenResults.innerHTML = '<p class="empty-state">Expression is empty.</p>';
-      if (parenHighlightCheckbox.checked) await sendToContentScript("CLEAR_HIGHLIGHT");
-      return;
-    }
-
-    const analyzer = new Analyzer();
-    const result = analyzer.analyze(expression);
-
-    const bracketDiagnostics = result.diagnostics.filter((d) => /parenthesis|bracket|brace/i.test(d.message));
-
-    if (bracketDiagnostics.length === 0) {
-      parenResults.innerHTML = '<p class="empty-state">All parentheses/brackets/braces are matched.</p>';
-      if (parenHighlightCheckbox.checked) await sendToContentScript("CLEAR_HIGHLIGHT");
-      return;
-    }
-
-    parenResults.innerHTML = `
-      <div class="diagnostics-list">
-        ${bracketDiagnostics
-          .map(
-            (d) => `
-              <div class="diagnostic-item error">
-                <span class="diagnostic-icon">⚠️</span>
-                <div class="diagnostic-content">
-                  <div class="diagnostic-message">${escapeHtml(d.message)}</div>
-                </div>
-              </div>
-            `
-          )
-          .join("")}
-      </div>
-    `;
-
-    if (parenHighlightCheckbox.checked) {
-      const target = bracketDiagnostics[0];
-      const hl = await sendToContentScript("HIGHLIGHT_LINE", { line: target.line });
-      if (!hl.success) {
-        parenResults.innerHTML += `<p class="hint">Couldn't highlight in editor: ${escapeHtml(hl.error)}</p>`;
-      }
-    }
+    await runParenCheck();
   } catch (err) {
     parenResults.innerHTML = `<p class="hint">Error: ${escapeHtml(err.message)}</p>`;
   }
 });
+
+function renderParenNav() {
+  const edit = parenPlan[parenIndex];
+  const { text, action } = describeParenEdit(edit);
+  const lineLabel = edit.atEnd ? `end (line ${parenTotalLines})` : `line ${edit.line}`;
+
+  parenResults.innerHTML = `
+    <p class="hint">${parenPlan.length} fix(es) needed.</p>
+    <div class="fr-nav">
+      <button class="btn fr-nav-btn" id="parenPrevBtn" title="Previous issue">&#9650;</button>
+      <span class="hint">Issue ${parenIndex + 1} of ${parenPlan.length} (${lineLabel})</span>
+      <button class="btn fr-nav-btn" id="parenNextBtn" title="Next issue">&#9660;</button>
+    </div>
+    <p class="hint">${escapeHtml(text)}</p>
+    <button class="btn" id="parenFixBtn">${escapeHtml(action)}</button>
+    <button class="btn" id="parenResolveAllBtn">Resolve All (${parenPlan.length})</button>
+    <p class="hint" id="parenFixStatus"></p>
+  `;
+
+  document.getElementById("parenPrevBtn").addEventListener("click", () => navigateParenIssue(-1));
+  document.getElementById("parenNextBtn").addEventListener("click", () => navigateParenIssue(1));
+  document.getElementById("parenFixBtn").addEventListener("click", () => applyParenFix(edit));
+  document.getElementById("parenResolveAllBtn").addEventListener("click", applyParenResolveAll);
+}
+
+async function navigateParenIssue(delta) {
+  parenIndex = (parenIndex + delta + parenPlan.length) % parenPlan.length;
+  renderParenNav();
+  if (parenHighlightCheckbox.checked) await highlightCurrentParenIssue();
+}
+
+async function highlightCurrentParenIssue() {
+  const edit = parenPlan[parenIndex];
+  const line = edit.atEnd ? parenTotalLines : edit.line;
+  const hl = await sendToContentScript("HIGHLIGHT_LINE", { line });
+  if (!hl.success) {
+    parenResults.innerHTML += `<p class="hint">Couldn't highlight in editor: ${escapeHtml(hl.error)}</p>`;
+  }
+}
+
+async function applyParenFix(edit) {
+  const statusEl = document.getElementById("parenFixStatus");
+  statusEl.textContent = "Applying...";
+  try {
+    const result = await sendToContentScript("APPLY_MULTI_CHAR_EDITS", { edits: [edit] });
+    if (!result.success) {
+      statusEl.textContent = "Error: " + result.error;
+      return;
+    }
+    statusEl.textContent = "Fixed. Re-checking...";
+    await runParenCheck();
+  } catch (err) {
+    statusEl.textContent = "Error: " + err.message;
+  }
+}
+
+async function applyParenResolveAll() {
+  const statusEl = document.getElementById("parenFixStatus");
+  statusEl.textContent = `Applying ${parenPlan.length} fix(es)...`;
+  try {
+    const result = await sendToContentScript("APPLY_MULTI_CHAR_EDITS", { edits: parenPlan });
+    if (!result.success) {
+      statusEl.textContent = "Error: " + result.error;
+      return;
+    }
+    statusEl.textContent = "Resolved. Re-checking...";
+    await runParenCheck();
+  } catch (err) {
+    statusEl.textContent = "Error: " + err.message;
+  }
+}
 
 // ─── Static Tools: Auto-Save ────────────────────────────────────────
 
