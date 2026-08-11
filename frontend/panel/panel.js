@@ -39,6 +39,7 @@ const state = {
   mode: "bulk", // expression edit mode: "bulk" | "line"
   lineStatus: [], // per line_by_line_edit entry: "pending" | "accepted" | "rejected"
   ruleInputMode: "auto", // rule input mode: "manual" | "auto"
+  ruleInputAutomationSupported: true, // false in editors other than the Expression Rule Designer
   ruleInputStatus: [], // per rule_input entry, auto mode only: "pending" | "accepted" | "error" | "rejected"
   lastRequestPayload: null, // debug: exact payload sent to background.js
 };
@@ -61,6 +62,7 @@ const ruleInputSection = document.getElementById("ruleInputSection");
 const riManualModeBtn = document.getElementById("riManualModeBtn");
 const riAutoModeBtn = document.getElementById("riAutoModeBtn");
 const riGridContainer = document.getElementById("riGridContainer");
+const riAutomationHint = document.getElementById("riAutomationHint");
 
 const debugRequest = document.getElementById("debugRequest");
 const debugResponse = document.getElementById("debugResponse");
@@ -91,6 +93,8 @@ async function refreshEditorState() {
   state.objectName = result.objectName;
   state.expression = result.expression;
   state.ruleInputs = result.ruleInputs;
+  state.ruleInputAutomationSupported = result.ruleInputAutomationSupported ?? true;
+  if (!state.ruleInputAutomationSupported) state.ruleInputMode = "manual";
   objectNameHint.textContent = state.objectName
     ? `Editing: ${state.objectName}`
     : "Open an expression rule in Appian to begin.";
@@ -271,11 +275,14 @@ riManualModeBtn.addEventListener("click", () => {
 });
 
 riAutoModeBtn.addEventListener("click", () => {
+  if (riAutoModeBtn.disabled) return;
   state.ruleInputMode = "auto";
   renderRuleInputSection();
 });
 
 function renderRuleInputSection() {
+  riAutoModeBtn.disabled = !state.ruleInputAutomationSupported;
+  riAutomationHint.hidden = state.ruleInputAutomationSupported;
   riManualModeBtn.classList.toggle("active", state.ruleInputMode === "manual");
   riAutoModeBtn.classList.toggle("active", state.ruleInputMode === "auto");
   renderRuleInputGrid();
