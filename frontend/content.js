@@ -17,6 +17,7 @@
     readState,
     applyEditViaKeystrokes,
     applyRangeEditViaKeystrokes,
+    applyMixedRangeEditsViaKeystrokes,
     triggerSave,
     readExpressionValue,
     highlightLine,
@@ -119,6 +120,72 @@
     if (message.type === "HIGHLIGHT_LINE") {
       highlightLine(message.line)
         .then((result) => sendResponse(result))
+        .catch((err) => sendResponse({ success: false, error: err.message }));
+      return true;
+    }
+
+    if (message.type === "HIGHLIGHT_TEXT_LOCATION") {
+      const root = findMainEditor();
+      if (!root) {
+        sendResponse({ success: false, error: "No expression editor found on this page" });
+        return true;
+      }
+      getAccurateExpressionText(root)
+        .then(async (text) => {
+          const idx = text.indexOf(message.text);
+          if (idx === -1) {
+            sendResponse({ success: false, error: "Could not locate this text in the current expression." });
+            return;
+          }
+          const line = lineNumberAtIndex(text, idx);
+          const result = await highlightLine(line);
+          sendResponse({ ...result, line });
+        })
+        .catch((err) => sendResponse({ success: false, error: err.message }));
+      return true;
+    }
+
+    if (message.type === "APPLY_MULTI_CHAR_EDITS") {
+      const root = findMainEditor();
+      if (!root) {
+        sendResponse({ success: false, error: "No expression editor found on this page" });
+        return true;
+      }
+      getAccurateExpressionText(root)
+        .then(async (currentText) => {
+          // Resolve each item's absolute index against ONE shared
+          // snapshot of the current text (atEnd items resolve to its
+          // length), so a batch of edits can be validated and ordered
+          // consistently before anything is actually typed.
+          const items = message.edits.map((item) => ({
+            ...item,
+            atIndex: item.atEnd ? currentText.length : item.atIndex,
+          }));
+
+          for (const item of items) {
+            const actual = currentText.slice(item.atIndex, item.atIndex + (item.deleteCount || 0));
+            if (item.expectedText !== undefined && actual !== item.expectedText) {
+              sendResponse({
+                success: false,
+                error: "The expression changed since the check ran — click Check Current Expression again.",
+              });
+              return;
+            }
+          }
+
+          // Apply from the end of the document backward so earlier
+          // edits' positions never shift out from under the ones still
+          // to come — same principle as Find & Replace All.
+          const sorted = items.slice().sort((a, b) => b.atIndex - a.atIndex);
+          const ranges = sorted.map((item) => ({
+            from: positionAtIndex(currentText, item.atIndex),
+            to: positionAtIndex(currentText, item.atIndex + (item.deleteCount || 0)),
+            text: item.insertText || "",
+          }));
+
+          const result = await applyMixedRangeEditsViaKeystrokes(ranges);
+          sendResponse(result);
+        })
         .catch((err) => sendResponse({ success: false, error: err.message }));
       return true;
     }
