@@ -5,11 +5,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.health_routes import router as health_router
 from app.ai_routes import router as ai_router
 from app.compat_routes import router as compat_router
+from app.parser_routes import router as parser_router
 
 app = FastAPI(
     title="Appian AI Context Service",
     description="Backend for providing AI-powered SAIL code assistance to the Appian browser extension",
-    version="0.2.0",
+    version="0.3.0",
 )
 
 # Allow Chrome extension to call this API
@@ -29,6 +30,9 @@ app.include_router(ai_router)
 
 # Backward-compatible routes for the Chrome extension frontend
 app.include_router(compat_router)
+
+# Solutions parser routes (Appian XML → JSON)
+app.include_router(parser_router)
 
 
 @app.get("/health")

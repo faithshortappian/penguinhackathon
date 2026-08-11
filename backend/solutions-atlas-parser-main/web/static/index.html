@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Appian Parser</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/jsoneditor/10.1.3/jsoneditor.min.css">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f7fa; color: #333; line-height: 1.6; }
+        .container { max-width: 1600px; margin: 0 auto; padding: 20px; }
+        header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px 20px; margin-bottom: 30px; border-radius: 12px; }
+        header h1 { font-size: 2rem; margin-bottom: 8px; }
+        header p { opacity: 0.9; }
+        .upload-section { background: white; border-radius: 12px; padding: 30px; margin-bottom: 30px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        .upload-zone { border: 2px dashed #ddd; border-radius: 8px; padding: 40px; text-align: center; cursor: pointer; transition: all 0.3s; }
+        .upload-zone:hover, .upload-zone.dragover { border-color: #667eea; background: #f8f9ff; }
+        .upload-zone input { display: none; }
+        .upload-zone .icon { font-size: 48px; margin-bottom: 10px; }
+        .upload-zone p { color: #666; }
+        .upload-zone .filename { margin-top: 15px; padding: 10px 20px; background: #e8f4e8; border-radius: 6px; color: #2d7a2d; font-weight: 500; }
+        .btn { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; padding: 12px 30px; border-radius: 6px; cursor: pointer; font-size: 1rem; font-weight: 500; transition: transform 0.2s, box-shadow 0.2s; }
+        .btn:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(102,126,234,0.4); }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+        .btn-secondary { background: #6c757d; }
+        .btn-sm { padding: 6px 14px; font-size: 0.85rem; }
+        .progress-bar { display: none; margin-top: 20px; height: 6px; background: #e9ecef; border-radius: 3px; overflow: hidden; }
+        .progress-bar.active { display: block; }
+        .progress-bar .fill { height: 100%; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); animation: progress 2s ease-in-out infinite; }
+        @keyframes progress { 0% { width: 0%; } 50% { width: 70%; } 100% { width: 100%; } }
+        .main-content { display: grid; grid-template-columns: 300px 1fr; gap: 20px; }
+        .sidebar { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); max-height: calc(100vh - 320px); overflow-y: auto; }
+        .sidebar h3 { margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid #eee; }
+</style>
+</head>
+<body>
+<div class="container">
+    <header><h1>📦 Appian Parser</h1><p>Upload an Appian application package to parse and explore its contents</p></header>
+    <div class="upload-section">
+        <div class="upload-zone" id="uploadZone">
+            <input type="file" id="fileInput" accept=".zip">
+            <div class="icon">📁</div>
+            <p>Drag & drop your Appian package ZIP here, or click to browse</p>
+            <div class="filename" id="selectedFile" style="display: none;"></div>
+        </div>
+        <div style="margin-top: 20px; text-align: center;"><button class="btn" id="processBtn" disabled>🚀 Process Package</button></div>
+        <div class="progress-bar" id="progressBar"><div class="fill"></div></div>
+    </div>
+    <div class="main-content">
+        <div class="sidebar"><h3>📋 Processed Jobs</h3><div id="jobsList"><div class="empty-state"><div class="icon">📭</div><p>No jobs yet</p></div></div></div>
+        <div class="viewer">
+            <div class="viewer-header">
+                <h3 id="viewerTitle">Select a job to view</h3>
+                <div class="viewer-actions" id="viewerActions" style="display: none;">
+                    <button class="btn btn-sm btn-secondary" id="downloadFileBtn">⬇️ Download File</button>
+                    <button class="btn btn-sm" id="downloadAllBtn">📦 Download All</button>
+                </div>
+            </div>
+            <div class="file-tabs" id="fileTabs" style="display: none;"></div>
+            <div id="jsonEditorContainer">
+                <div class="empty-state" id="emptyState"><div class="icon">👈</div><p>Select a job from the sidebar</p></div>
+                <div id="jsonEditor"></div>
+            </div>
+        </div>
+    </div>
+</div>
+<div class="toast" id="toast"></div>
+<style>
+    .job-item { padding: 12px; border-radius: 8px; cursor: pointer; margin-bottom: 8px; transition: background 0.2s; border: 1px solid #eee; }
+    .job-item:hover { background: #f8f9ff; }
+    .job-item.active { background: #e8f0ff; border-color: #667eea; }
+    .job-item .job-id { font-weight: 600; color: #667eea; font-size: 0.9rem; }
+    .job-item .job-name { font-size: 0.85rem; color: #666; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .job-item .job-stats { font-size: 0.75rem; color: #999; margin-top: 4px; }
+    .viewer { background: white; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); display: flex; flex-direction: column; max-height: calc(100vh - 320px); overflow: hidden; }
+    .viewer-header { padding: 15px 20px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+    .viewer-header h3 { font-size: 1rem; }
+    .viewer-actions { display: flex; gap: 8px; }
+    .file-tabs { display: flex; gap: 5px; padding: 10px 20px; background: #f8f9fa; border-bottom: 1px solid #eee; overflow-x: auto; flex-wrap: nowrap; }
+    .file-tab { padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; white-space: nowrap; background: white; border: 1px solid #ddd; transition: all 0.2s; }
+    .file-tab:hover { border-color: #667eea; }
+    .file-tab.active { background: #667eea; color: white; border-color: #667eea; }
+    #jsonEditorContainer { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+    #jsonEditor { flex: 1; overflow: auto; }
+    .jsoneditor { border: none !important; }
+    .jsoneditor-menu { background: #667eea !important; border-bottom: 1px solid #5a6fd6 !important; }
+    .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 300px; color: #999; }
+    .empty-state .icon { font-size: 64px; margin-bottom: 15px; opacity: 0.5; }
+    .folder-list { padding: 20px; }
+    .folder-list h3 { margin-bottom: 15px; color: #333; }
+    .folder-item { padding: 10px 15px; margin: 5px 0; background: #f8f9fa; border-radius: 6px; cursor: pointer; transition: background 0.2s; }
+    .folder-item:hover { background: #e8f0ff; }
+    .toast { position: fixed; bottom: 20px; right: 20px; padding: 15px 25px; border-radius: 8px; color: white; font-weight: 500; transform: translateY(100px); opacity: 0; transition: all 0.3s; z-index: 1000; }
+    .toast.show { transform: translateY(0); opacity: 1; }
+    .toast.success { background: #28a745; }
+    .toast.error { background: #dc3545; }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsoneditor/10.1.3/jsoneditor.min.js"></script>
+<script>
+const uploadZone = document.getElementById('uploadZone'), fileInput = document.getElementById('fileInput'), selectedFile = document.getElementById('selectedFile');
+const processBtn = document.getElementById('processBtn'), progressBar = document.getElementById('progressBar'), jobsList = document.getElementById('jobsList');
+const viewerTitle = document.getElementById('viewerTitle'), viewerActions = document.getElementById('viewerActions'), fileTabs = document.getElementById('fileTabs');
+const emptyState = document.getElementById('emptyState'), toast = document.getElementById('toast');
+let currentFile = null, currentJobId = null, currentFilePath = null, jsonEditor = null;
+
+uploadZone.addEventListener('click', () => fileInput.click());
+uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
+uploadZone.addEventListener('drop', e => { e.preventDefault(); uploadZone.classList.remove('dragover'); if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', () => { if (fileInput.files.length) handleFile(fileInput.files[0]); });
+
+function handleFile(file) {
+    if (!file.name.endsWith('.zip')) { showToast('Please select a ZIP file', 'error'); return; }
+    currentFile = file;
+    selectedFile.textContent = '📄 ' + file.name;
+    selectedFile.style.display = 'inline-block';
+    processBtn.disabled = false;
+}
+
+processBtn.addEventListener('click', async () => {
+    if (!currentFile) return;
+    processBtn.disabled = true;
+    progressBar.classList.add('active');
+    const formData = new FormData();
+    formData.append('file', currentFile);
+    try {
+        const response = await fetch('/api/upload', { method: 'POST', body: formData });
+        const data = await response.json();
+        if (response.ok) { showToast('Parsed ' + data.objects_parsed + ' objects!', 'success'); loadJobs(); selectJob(data.job_id); }
+        else { showToast(data.error || 'Processing failed', 'error'); }
+    } catch (err) { showToast('Network error', 'error'); }
+    finally { progressBar.classList.remove('active'); processBtn.disabled = false; currentFile = null; selectedFile.style.display = 'none'; fileInput.value = ''; }
+});
+</script>
+<script>
+async function loadJobs() {
+    try {
+        const response = await fetch('/api/jobs');
+        const jobs = await response.json();
+        if (jobs.length === 0) { jobsList.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>No jobs yet</p></div>'; return; }
+        jobsList.innerHTML = jobs.map(job => '<div class="job-item ' + (job.job_id === currentJobId ? 'active' : '') + '" data-id="' + job.job_id + '"><div class="job-id">#' + job.job_id + '</div><div class="job-name">' + job.filename + '</div><div class="job-stats">' + job.objects_parsed + ' objects</div></div>').join('');
+        document.querySelectorAll('.job-item').forEach(item => { item.addEventListener('click', () => selectJob(parseInt(item.dataset.id))); });
+    } catch (err) { console.error('Failed to load jobs:', err); }
+}
+
+async function selectJob(jobId) {
+    currentJobId = jobId;
+    document.querySelectorAll('.job-item').forEach(item => { item.classList.toggle('active', parseInt(item.dataset.id) === jobId); });
+    try {
+        const response = await fetch('/api/jobs/' + jobId + '/files');
+        const files = await response.json();
+        viewerTitle.textContent = 'Job #' + jobId;
+        viewerActions.style.display = 'flex';
+        fileTabs.style.display = 'flex';
+        // Top-level files (no slash) + bundles/_index.json as a top-level tab
+        const mainFiles = files.filter(f => !f.path.includes('/'));
+        const bundleIndex = files.find(f => f.path === 'bundles/_index.json');
+        const objectFiles = files.filter(f => f.path.startsWith('objects/'));
+        const bundleFiles = files.filter(f => f.path.startsWith('bundles/') && f.path !== 'bundles/_index.json');
+
+        fileTabs.innerHTML = mainFiles.map(f => '<div class="file-tab" data-path="' + f.path + '">' + f.name.replace('.json', '') + '</div>').join('');
+        if (bundleIndex) {
+            fileTabs.innerHTML += '<div class="file-tab" data-path="' + bundleIndex.path + '">📋 bundle index</div>';
+        }
+        if (objectFiles.length > 0) {
+            const folders = [...new Set(objectFiles.map(f => f.path.split('/')[1]))];
+            folders.forEach(folder => {
+                const count = objectFiles.filter(f => f.path.split('/')[1] === folder).length;
+                fileTabs.innerHTML += '<div class="file-tab" data-folder="objects/' + folder + '">📁 ' + folder + ' (' + count + ')</div>';
+            });
+        }
+        if (bundleFiles.length > 0) {
+            const bundleFolders = [...new Set(bundleFiles.map(f => f.path.split('/')[1]))];
+            bundleFolders.forEach(folder => {
+                const count = bundleFiles.filter(f => f.path.split('/')[1] === folder).length;
+                fileTabs.innerHTML += '<div class="file-tab" data-folder="bundles/' + folder + '">📦 ' + folder + ' (' + count + ')</div>';
+            });
+        }
+        document.querySelectorAll('.file-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                if (tab.dataset.path) loadFile(jobId, tab.dataset.path);
+                else if (tab.dataset.folder) {
+                    const prefix = tab.dataset.folder;
+                    const matching = files.filter(f => f.path.startsWith(prefix + '/'));
+                    showFolderFiles(jobId, prefix.split('/').pop(), matching);
+                }
+            });
+        });
+        if (mainFiles.length > 0) loadFile(jobId, 'manifest.json');
+    } catch (err) { console.error('Failed to load job files:', err); }
+}
+</script>
+<script>
+function showFolderFiles(jobId, folder, folderFiles) {
+    document.querySelectorAll('.file-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.file-tab').forEach(t => { if (t.dataset.folder && t.dataset.folder.endsWith('/' + folder)) t.classList.add('active'); });
+    emptyState.style.display = 'none';
+    if (jsonEditor) { jsonEditor.destroy(); jsonEditor = null; }
+    document.getElementById('jsonEditor').innerHTML = '<div class="folder-list"><h3>📁 ' + folder + ' (' + folderFiles.length + ' files)</h3>' + folderFiles.map(f => '<div class="folder-item" onclick="loadFile(' + jobId + ', \'' + f.path.replace(/'/g, "\\'") + '\')">📄 ' + f.name + '</div>').join('') + '</div>';
+}
+
+async function loadFile(jobId, path) {
+    currentFilePath = path;
+    document.querySelectorAll('.file-tab').forEach(t => t.classList.toggle('active', t.dataset.path === path));
+    try {
+        const response = await fetch('/api/jobs/' + jobId + '/file?path=' + encodeURIComponent(path));
+        const data = await response.json();
+        emptyState.style.display = 'none';
+        if (jsonEditor) jsonEditor.destroy();
+        const container = document.getElementById('jsonEditor');
+        container.innerHTML = '';
+        jsonEditor = new JSONEditor(container, { mode: 'view', modes: ['view', 'code', 'tree', 'text'], search: true, navigationBar: true, statusBar: true, mainMenuBar: true, enableSort: false, enableTransform: false });
+        jsonEditor.set(data);
+        jsonEditor.expandAll();
+    } catch (err) { document.getElementById('jsonEditor').innerHTML = '<div class="empty-state"><p>Failed to load file</p></div>'; }
+}
+
+document.getElementById('downloadFileBtn').addEventListener('click', () => { if (currentJobId && currentFilePath) window.location.href = '/api/jobs/' + currentJobId + '/download?path=' + encodeURIComponent(currentFilePath); });
+document.getElementById('downloadAllBtn').addEventListener('click', () => { if (currentJobId) window.location.href = '/api/jobs/' + currentJobId + '/download-all'; });
+function showToast(message, type) { toast.textContent = message; toast.className = 'toast ' + type + ' show'; setTimeout(() => toast.classList.remove('show'), 3000); }
+loadJobs();
+</script>
+</body>
+</html>
