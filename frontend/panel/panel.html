@@ -45,8 +45,12 @@
 
       <div class="mode-toggle" id="riModeToggle">
         <button class="mode-btn" data-ri-mode="manual" id="riManualModeBtn">Manual</button>
-        <button class="mode-btn active" data-ri-mode="auto" id="riAutoModeBtn">Auto (Accept fills names)</button>
+        <button class="mode-btn active" data-ri-mode="auto" id="riAutoModeBtn">Auto</button>
       </div>
+      <p class="hint" id="riAutomationHint" hidden>
+        Auto-fill isn't available in this editor (only Appian's Expression Rule Designer supports
+        it) — use Manual mode.
+      </p>
 
       <div id="riGridContainer"></div>
     </section>

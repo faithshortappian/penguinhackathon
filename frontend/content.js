@@ -32,6 +32,19 @@
     return document.title.split("•")[0].trim();
   }
 
+  // Appian's Interface Designer also has a "Rule Inputs" panel and its
+  // "+" control also matches [aria-label*="New Rule Input"] — but it
+  // opens a modal dialog (Name/Description/Type/Array all in one form)
+  // instead of an inline editable grid row. Confirmed live: our
+  // automation would click it, then time out waiting for a row that
+  // never appears, leaving the modal open and unfilled. Rather than
+  // build a second automation path for that modal, only allow
+  // automated rule-input writes in the one editor confirmed compatible
+  // with the grid-based flow this file implements.
+  function ruleInputAutomationSupported() {
+    return document.title.includes("Expression Rule Designer");
+  }
+
   function applyLineEdit(currentText, find, replace) {
     const index = currentText.indexOf(find);
     if (index === -1) {
@@ -51,6 +64,7 @@
         objectName: objectNameFromTitle(),
         expression: root ? readState(root)?.fullText ?? "" : "",
         ruleInputs: readRuleInputs(),
+        ruleInputAutomationSupported: ruleInputAutomationSupported(),
       });
       return true;
     }
@@ -86,6 +100,10 @@
     }
 
     if (message.type === "ADD_RULE_INPUT") {
+      if (!ruleInputAutomationSupported()) {
+        sendResponse({ success: false, error: "Rule input automation isn't supported in this editor" });
+        return true;
+      }
       // Name only, by design — see content/rule-inputs-bridge.js header.
       addRuleInput(message.name)
         .then((result) => sendResponse(result))
@@ -94,6 +112,10 @@
     }
 
     if (message.type === "EDIT_RULE_INPUT") {
+      if (!ruleInputAutomationSupported()) {
+        sendResponse({ success: false, error: "Rule input automation isn't supported in this editor" });
+        return true;
+      }
       // Name only, by design — see content/rule-inputs-bridge.js header.
       editRuleInputName(message.index, message.name)
         .then((result) => sendResponse(result))
