@@ -12,66 +12,126 @@
     <span class="status-dot" id="statusDot" title="Idle"></span>
   </header>
 
+  <div class="top-tabs" id="topTabs">
+    <button class="top-tab-btn active" data-tab="static" id="staticTabBtn">Static Tools</button>
+    <button class="top-tab-btn" data-tab="dynamic" id="dynamicTabBtn">Dynamic Tools</button>
+  </div>
+
   <main>
-    <!-- Prompt -->
-    <section class="section">
-      <h2>Ask AI</h2>
-      <p class="hint" id="objectNameHint">Open an expression rule in Appian to begin.</p>
-      <textarea id="promptInput" rows="3" placeholder="e.g. add a null check for the employee input"></textarea>
-      <button class="btn" id="askBtn">Ask AI</button>
-      <p class="hint" id="askStatus"></p>
-    </section>
+    <!-- Static Tools (default tab): editor-local utilities that don't call the backend -->
+    <div class="tab-panel" id="staticToolsPanel">
+      <section class="section">
+        <h2>Find &amp; Replace</h2>
+        <p class="hint">
+          Click Find, then step between matches with ▲/▼ (or the arrow keys) — each one is
+          highlighted in the editor before you replace it.
+        </p>
+        <input type="text" class="text-input" id="frFindInput" placeholder="Find..." />
+        <input type="text" class="text-input" id="frReplaceInput" placeholder="Replace with..." />
+        <div class="fr-nav">
+          <button class="btn" id="frFindBtn">Find</button>
+          <button class="btn fr-nav-btn" id="frPrevBtn" disabled title="Previous match">&#9650;</button>
+          <button class="btn fr-nav-btn" id="frNextBtn" disabled title="Next match">&#9660;</button>
+        </div>
+        <p class="hint" id="frMatchStatus"></p>
+        <button class="btn" id="frReplaceBtn" disabled>Replace Selected</button>
+        <button class="btn" id="frReplaceAllBtn">Replace All</button>
+        <p class="hint" id="frStatus"></p>
+      </section>
 
-    <!-- Suggestion (hidden until a response arrives) -->
-    <section class="section" id="suggestionSection" hidden>
-      <h2>Suggestion</h2>
-      <p class="summary-text" id="suggestionResponse"></p>
+      <section class="section">
+        <h2>Parenthesis Checker</h2>
+        <p class="hint">
+          Scans the current expression for unmatched parentheses, brackets, and braces, and shows
+          which line each problem is on.
+        </p>
+        <label class="checkbox-label">
+          <input type="checkbox" id="parenHighlightCheckbox" checked />
+          Highlight problem line in the editor
+        </label>
+        <button class="btn" id="parenCheckBtn">Check Current Expression</button>
+        <div id="parenResults"></div>
+      </section>
 
-      <div class="mode-toggle" id="modeToggle">
-        <button class="mode-btn active" data-mode="bulk" id="bulkModeBtn">Bulk</button>
-        <button class="mode-btn" data-mode="line" id="lineModeBtn">Line by line</button>
-      </div>
+      <section class="section">
+        <h2>Auto-Save</h2>
+        <p class="hint">Periodically clicks Appian's own Save button while this panel is open.</p>
+        <label class="checkbox-label">
+          <input type="checkbox" id="autoSaveEnabled" />
+          Enable auto-save
+        </label>
+        <div class="mode-toggle" id="autoSaveIntervalToggle">
+          <button class="mode-btn active" data-minutes="5">5 min</button>
+          <button class="mode-btn" data-minutes="10">10 min</button>
+          <button class="mode-btn" data-minutes="15">15 min</button>
+          <button class="mode-btn" data-minutes="30">30 min</button>
+        </div>
+        <p class="hint" id="autoSaveStatus">Auto-save is off.</p>
+      </section>
+    </div>
 
-      <div id="editsContainer"></div>
-    </section>
+    <!-- Dynamic Tools: the AI assistant UI -->
+    <div class="tab-panel" id="dynamicToolsPanel" hidden>
+      <!-- Prompt -->
+      <section class="section">
+        <h2>Ask AI</h2>
+        <p class="hint" id="objectNameHint">Open an expression rule in Appian to begin.</p>
+        <textarea id="promptInput" rows="3" placeholder="e.g. add a null check for the employee input"></textarea>
+        <button class="btn" id="askBtn">Ask AI</button>
+        <p class="hint" id="askStatus"></p>
+      </section>
 
-    <!-- Rule input changes (hidden until a response with rule_input arrives) -->
-    <section class="section" id="ruleInputSection" hidden>
-      <h2>Rule Input Changes</h2>
-      <p class="hint">
-        Only the Name is ever written automatically — Type and Array proved unreliable to
-        automate, so use this grid as your reference and set those two by hand in Appian.
-      </p>
+      <!-- Suggestion (hidden until a response arrives) -->
+      <section class="section" id="suggestionSection" hidden>
+        <h2>Suggestion</h2>
+        <p class="summary-text" id="suggestionResponse"></p>
 
-      <div class="mode-toggle" id="riModeToggle">
-        <button class="mode-btn" data-ri-mode="manual" id="riManualModeBtn">Manual</button>
-        <button class="mode-btn active" data-ri-mode="auto" id="riAutoModeBtn">Auto</button>
-      </div>
-      <p class="hint" id="riAutomationHint" hidden>
-        Auto-fill isn't available in this editor (only Appian's Expression Rule Designer supports
-        it) — use Manual mode.
-      </p>
+        <div class="mode-toggle" id="modeToggle">
+          <button class="mode-btn active" data-mode="bulk" id="bulkModeBtn">Bulk</button>
+          <button class="mode-btn" data-mode="line" id="lineModeBtn">Line by line</button>
+        </div>
 
-      <div id="riGridContainer"></div>
-    </section>
+        <div id="editsContainer"></div>
+      </section>
 
-    <!-- Debug: exact JSON sent to the backend and kept in panel state -->
-    <section class="section" id="debugSection">
-      <h2>Debug: Request / Response JSON</h2>
-      <p class="hint">Request sent to background.js (REQUEST_SUGGESTION payload):</p>
-      <pre id="debugRequest" style="white-space: pre-wrap; font-size: 11px;">(none yet)</pre>
-      <p class="hint">Response kept in panel state (state.suggestion):</p>
-      <pre id="debugResponse" style="white-space: pre-wrap; font-size: 11px;">(none yet)</pre>
-    </section>
+      <!-- Rule input changes (hidden until a response with rule_input arrives) -->
+      <section class="section" id="ruleInputSection" hidden>
+        <h2>Rule Input Changes</h2>
+        <p class="hint">
+          Only the Name is ever written automatically — Type and Array proved unreliable to
+          automate, so use this grid as your reference and set those two by hand in Appian.
+        </p>
 
-    <!-- Dev Test: exercises the real chrome.debugger write path directly -->
-    <section class="section" id="devTestSection">
-      <h2>Dev Test: Apply Edit</h2>
-      <p class="hint">Sends text to the active tab's expression editor via simulated keystrokes.</p>
-      <textarea id="testEditInput" rows="3" placeholder="a!isNullOrEmpty(ri!employee)"></textarea>
-      <button class="btn" id="testEditBtn">Send Test Edit</button>
-      <pre id="testEditResult" style="white-space: pre-wrap; font-size: 12px;"></pre>
-    </section>
+        <div class="mode-toggle" id="riModeToggle">
+          <button class="mode-btn" data-ri-mode="manual" id="riManualModeBtn">Manual</button>
+          <button class="mode-btn active" data-ri-mode="auto" id="riAutoModeBtn">Auto</button>
+        </div>
+        <p class="hint" id="riAutomationHint" hidden>
+          Auto-fill isn't available in this editor (only Appian's Expression Rule Designer
+          supports it) — use Manual mode.
+        </p>
+
+        <div id="riGridContainer"></div>
+      </section>
+
+      <!-- Debug: exact JSON sent to the backend and kept in panel state -->
+      <section class="section" id="debugSection">
+        <h2>Debug: Request / Response JSON</h2>
+        <p class="hint">Request sent to background.js (REQUEST_SUGGESTION payload):</p>
+        <pre id="debugRequest" style="white-space: pre-wrap; font-size: 11px;">(none yet)</pre>
+        <p class="hint">Response kept in panel state (state.suggestion):</p>
+        <pre id="debugResponse" style="white-space: pre-wrap; font-size: 11px;">(none yet)</pre>
+      </section>
+
+      <!-- Dev Test: exercises the real chrome.debugger write path directly -->
+      <section class="section" id="devTestSection">
+        <h2>Dev Test: Apply Edit</h2>
+        <p class="hint">Sends text to the active tab's expression editor via simulated keystrokes.</p>
+        <textarea id="testEditInput" rows="3" placeholder="a!isNullOrEmpty(ri!employee)"></textarea>
+        <button class="btn" id="testEditBtn">Send Test Edit</button>
+        <pre id="testEditResult" style="white-space: pre-wrap; font-size: 12px;"></pre>
+      </section>
+    </div>
   </main>
 
   <script type="module" src="panel.js"></script>

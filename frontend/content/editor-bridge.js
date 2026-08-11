@@ -130,6 +130,79 @@ export async function applyEditViaKeystrokes(editorRoot, newText) {
 }
 
 /**
+ * Clicks Appian's own Save control via a real trusted click (same
+ * chrome.debugger path as applyEditViaKeystrokes) so it registers with
+ * Appian's own save flow rather than being a no-op synthetic click.
+ * Selector is best-effort — Appian doesn't expose a stable test id here,
+ * so this matches on the keyboard-shortcut tooltip title, which has been
+ * stable across the Expression Rule Designer and Interface Designer.
+ */
+export async function triggerSave(doc = document) {
+  // Appian's Save button has no title/aria-label — confirmed live via
+  // its actual outer HTML. The only stable, distinctive marker is the
+  // visually-hidden keyboard-shortcut hint span it renders for screen
+  // readers: <span class="Button---accessibilityhidden">Ctrl/Cmd + S</span>.
+  const saveBtn = Array.from(doc.querySelectorAll("button.Button---btn")).find((btn) => {
+    const hint = btn.querySelector(".Button---accessibilityhidden");
+    return hint && /ctrl\/cmd\s*\+\s*s/i.test(hint.textContent || "");
+  });
+
+  if (!saveBtn) {
+    return { success: false, error: "Could not find Appian's Save button on this page" };
+  }
+  if (saveBtn.disabled) {
+    return { success: false, error: "Save button is disabled (no unsaved changes?)" };
+  }
+
+  const rect = saveBtn.getBoundingClientRect();
+  const x = rect.left + rect.width / 2;
+  const y = rect.top + rect.height / 2;
+
+  const response = await chrome.runtime.sendMessage({ type: "CLICK_VIA_DEBUGGER", x, y });
+  return response ?? { success: false, error: "No response from background script" };
+}
+
+/**
+ * Reads the expression editor's full logical text via the background
+ * worker's chrome.debugger Runtime.evaluate path (see cdp-typer.js
+ * getEditorValue) rather than the pure-DOM join above, since the DOM
+ * join drops lines CodeMirror hasn't mounted into the viewport. Callers
+ * should fall back to readState()'s DOM join if this reports failure.
+ */
+export async function readExpressionValue() {
+  const response = await chrome.runtime.sendMessage({ type: "GET_EDITOR_VALUE_VIA_DEBUGGER" });
+  return response ?? { success: false, error: "No response from background script" };
+}
+
+export async function highlightLine(lineNumber) {
+  const response = await chrome.runtime.sendMessage({ type: "HIGHLIGHT_EDITOR_LINE", line: lineNumber });
+  return response ?? { success: false, error: "No response from background script" };
+}
+
+export async function clearHighlight() {
+  const response = await chrome.runtime.sendMessage({ type: "CLEAR_EDITOR_HIGHLIGHT" });
+  return response ?? { success: false, error: "No response from background script" };
+}
+
+/**
+ * Replaces one or more explicit ranges (0-indexed {line, ch} pairs, in
+ * descending document order — see cdp-typer.js replaceRangesText) with
+ * `text`, by selecting exactly that range and typing over it, instead
+ * of retyping the whole document like applyEditViaKeystrokes does. Used
+ * by the Find & Replace tool so unrelated, already-correct parentheses
+ * elsewhere in the expression are never retyped and can't spuriously
+ * trigger Appian's auto-close-bracket behavior.
+ */
+export async function applyRangeEditViaKeystrokes(ranges, text) {
+  const response = await chrome.runtime.sendMessage({
+    type: "APPLY_RANGE_EDIT_VIA_KEYSTROKES",
+    ranges,
+    text,
+  });
+  return response ?? { success: false, error: "No response from background script" };
+}
+
+/**
  * Direct-API write, used only by the standalone test harnesses
  * (frontend/test/*.html), which run in the page's own main world where
  * `element.CodeMirror` is genuinely reachable. Not usable from the real

@@ -3,7 +3,17 @@
  * Handles communication between content script, side panel, and backend API.
  */
 
-import { replaceAllText, typeText, click, pressEnter, typeThenSelectWithEnter } from "./background/cdp-typer.js";
+import {
+  replaceAllText,
+  replaceRangesText,
+  typeText,
+  click,
+  pressEnter,
+  typeThenSelectWithEnter,
+  getEditorValue,
+  highlightEditorLine,
+  clearEditorHighlight,
+} from "./background/cdp-typer.js";
 
 // Default backend URL — configurable via extension storage
 const DEFAULT_BACKEND_URL = "http://localhost:8000";
@@ -51,6 +61,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         .catch((err) => sendResponse({ success: false, error: err.message }));
       return true;
 
+    case "APPLY_RANGE_EDIT_VIA_KEYSTROKES":
+      if (!sender.tab?.id) {
+        sendResponse({ success: false, error: "No tab associated with this request" });
+        break;
+      }
+      replaceRangesText(sender.tab.id, message.ranges, message.text)
+        .then(() => sendResponse({ success: true }))
+        .catch((err) => sendResponse({ success: false, error: err.message }));
+      return true;
+
     case "TYPE_TEXT_VIA_KEYSTROKES":
       if (!sender.tab?.id) {
         sendResponse({ success: false, error: "No tab associated with this request" });
@@ -87,6 +107,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       click(sender.tab.id, message.x, message.y)
+        .then(() => sendResponse({ success: true }))
+        .catch((err) => sendResponse({ success: false, error: err.message }));
+      return true;
+
+    case "GET_EDITOR_VALUE_VIA_DEBUGGER":
+      if (!sender.tab?.id) {
+        sendResponse({ success: false, error: "No tab associated with this request" });
+        break;
+      }
+      getEditorValue(sender.tab.id)
+        .then((value) => sendResponse({ success: true, value }))
+        .catch((err) => sendResponse({ success: false, error: err.message }));
+      return true;
+
+    case "HIGHLIGHT_EDITOR_LINE":
+      if (!sender.tab?.id) {
+        sendResponse({ success: false, error: "No tab associated with this request" });
+        break;
+      }
+      highlightEditorLine(sender.tab.id, message.line)
+        .then(() => sendResponse({ success: true }))
+        .catch((err) => sendResponse({ success: false, error: err.message }));
+      return true;
+
+    case "CLEAR_EDITOR_HIGHLIGHT":
+      if (!sender.tab?.id) {
+        sendResponse({ success: false, error: "No tab associated with this request" });
+        break;
+      }
+      clearEditorHighlight(sender.tab.id)
         .then(() => sendResponse({ success: true }))
         .catch((err) => sendResponse({ success: false, error: err.message }));
       return true;
