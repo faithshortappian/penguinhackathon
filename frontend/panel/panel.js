@@ -54,25 +54,15 @@ import { Tokenizer, TokenType } from "../parser/tokenizer.js";
 function computeLineDiff(oldText, newText) {
   if (oldText === newText) return [];
 
-  // dispatchText (cdp-typer.js) strips leading whitespace from every
-  // line as it types — indentation is left entirely to Appian's own
-  // auto-format button, not tracked here at all. So the diff has to
-  // compare lines ignoring indentation too: without this, re-running
-  // the diff after accepting a hunk would keep seeing that now-
-  // unindented live line as "different" from the (still indented) raw
-  // target line forever, and the hunk would never actually disappear.
-  const stripIndent = (line) => line.replace(/^[ \t]+/, "");
-
-  const oldLines = oldText.split("\n"); // raw — real offsets/expectedText need the real text
-  const newLines = newText.split("\n").map(stripIndent); // pre-stripped — this is what actually gets typed
-  const oldLinesNorm = oldLines.map(stripIndent); // used only for equality checks below
+  const oldLines = oldText.split("\n");
+  const newLines = newText.split("\n");
   const n = oldLines.length;
   const m = newLines.length;
 
   const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
   for (let i = n - 1; i >= 0; i--) {
     for (let j = m - 1; j >= 0; j--) {
-      dp[i][j] = oldLinesNorm[i] === newLines[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      dp[i][j] = oldLines[i] === newLines[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
     }
   }
 
@@ -80,7 +70,7 @@ function computeLineDiff(oldText, newText) {
   let i = 0;
   let j = 0;
   while (i < n && j < m) {
-    if (oldLinesNorm[i] === newLines[j]) {
+    if (oldLines[i] === newLines[j]) {
       ops.push({ type: "equal" });
       i++;
       j++;
@@ -147,14 +137,12 @@ function computeLineDiff(oldText, newText) {
     }
 
     hunks.push({
-      old: deleted.map(stripIndent).join("\n"),
-      new: inserted.join("\n"), // already stripped — newLines was pre-stripped above
+      old: deleted.join("\n"),
+      new: inserted.join("\n"),
       line: startLine + 1,
       atIndex: startIndex,
       deleteCount: endIndex - startIndex,
       insertText,
-      // Raw, unstripped — must match the live document's actual text
-      // exactly for the staleness check in APPLY_MULTI_CHAR_EDITS.
       expectedText: oldText.slice(startIndex, endIndex),
     });
   }
