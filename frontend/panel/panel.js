@@ -27,7 +27,14 @@
  *     one row at a time rather than looping through all of them
  *     automatically: confirmed live that firing several of these
  *     back-to-back without a real pause in between is unreliable.
+ *
+ * Static Tools tab (default on open) holds editor-local utilities that
+ * never call the backend: Find & Replace, a parenthesis/bracket matcher
+ * (reuses the existing tokenizer/analyzer), and Auto-Save (periodically
+ * clicks Appian's own Save button).
  */
+
+import { Analyzer } from "../parser/analyzer.js";
 
 // ─── State ──────────────────────────────────────────────────────────
 
@@ -66,6 +73,29 @@ const riAutomationHint = document.getElementById("riAutomationHint");
 
 const debugRequest = document.getElementById("debugRequest");
 const debugResponse = document.getElementById("debugResponse");
+
+const staticTabBtn = document.getElementById("staticTabBtn");
+const dynamicTabBtn = document.getElementById("dynamicTabBtn");
+const staticToolsPanel = document.getElementById("staticToolsPanel");
+const dynamicToolsPanel = document.getElementById("dynamicToolsPanel");
+
+const frFindInput = document.getElementById("frFindInput");
+const frReplaceInput = document.getElementById("frReplaceInput");
+const frFindBtn = document.getElementById("frFindBtn");
+const frPrevBtn = document.getElementById("frPrevBtn");
+const frNextBtn = document.getElementById("frNextBtn");
+const frMatchStatus = document.getElementById("frMatchStatus");
+const frReplaceBtn = document.getElementById("frReplaceBtn");
+const frReplaceAllBtn = document.getElementById("frReplaceAllBtn");
+const frStatus = document.getElementById("frStatus");
+
+const parenCheckBtn = document.getElementById("parenCheckBtn");
+const parenResults = document.getElementById("parenResults");
+const parenHighlightCheckbox = document.getElementById("parenHighlightCheckbox");
+
+const autoSaveEnabled = document.getElementById("autoSaveEnabled");
+const autoSaveIntervalButtons = Array.from(document.querySelectorAll("#autoSaveIntervalToggle .mode-btn"));
+const autoSaveStatus = document.getElementById("autoSaveStatus");
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -429,6 +459,263 @@ document.getElementById("testEditBtn").addEventListener("click", async () => {
   } catch (err) {
     resultEl.textContent = "Error: " + err.message;
   }
+});
+
+// ─── Top-level tabs ─────────────────────────────────────────────────
+
+function switchTab(tab) {
+  staticTabBtn.classList.toggle("active", tab === "static");
+  dynamicTabBtn.classList.toggle("active", tab === "dynamic");
+  staticToolsPanel.hidden = tab !== "static";
+  dynamicToolsPanel.hidden = tab !== "dynamic";
+}
+
+staticTabBtn.addEventListener("click", () => switchTab("static"));
+dynamicTabBtn.addEventListener("click", () => switchTab("dynamic"));
+
+// ─── Static Tools: Find & Replace ──────────────────────────────────
+//
+// Find locates every occurrence of the search text and highlights the
+// first one in the editor. ▲/▼ (or the arrow keys, while the Find input
+// is focused) step between matches, re-highlighting as you go, so you
+// can see exactly what you're about to change before Replace Selected
+// commits it. The match list is a snapshot from the moment Find ran —
+// Replace Selected re-validates the text at that exact position still
+// matches before writing, and asks you to re-Find if the editor changed
+// underneath it.
+
+let frMatches = [];
+let frCurrentIndex = -1;
+
+function updateFrNav() {
+  const hasMatches = frMatches.length > 0;
+  frPrevBtn.disabled = !hasMatches;
+  frNextBtn.disabled = !hasMatches;
+  frReplaceBtn.disabled = !hasMatches;
+}
+
+async function highlightCurrentFrMatch() {
+  const m = frMatches[frCurrentIndex];
+  frMatchStatus.textContent = `Match ${frCurrentIndex + 1} of ${frMatches.length} (line ${m.line}).`;
+  await sendToContentScript("HIGHLIGHT_LINE", { line: m.line });
+}
+
+frFindBtn.addEventListener("click", async () => {
+  const find = frFindInput.value;
+  if (!find) {
+    frMatchStatus.textContent = "Enter text to find.";
+    return;
+  }
+
+  frFindBtn.disabled = true;
+  frMatchStatus.textContent = "Searching...";
+  frStatus.textContent = "";
+  try {
+    const result = await sendToContentScript("FIND_MATCHES", { find });
+    if (!result.success) {
+      frMatches = [];
+      frCurrentIndex = -1;
+      frMatchStatus.textContent = "Error: " + result.error;
+    } else {
+      frMatches = result.matches;
+      frCurrentIndex = frMatches.length ? 0 : -1;
+      if (frCurrentIndex === -1) {
+        frMatchStatus.textContent = "No matches found.";
+        await sendToContentScript("CLEAR_HIGHLIGHT");
+      } else {
+        await highlightCurrentFrMatch();
+      }
+    }
+  } catch (err) {
+    frMatchStatus.textContent = "Error: " + err.message;
+  } finally {
+    frFindBtn.disabled = false;
+    updateFrNav();
+  }
+});
+
+frPrevBtn.addEventListener("click", async () => {
+  if (!frMatches.length) return;
+  frCurrentIndex = (frCurrentIndex - 1 + frMatches.length) % frMatches.length;
+  await highlightCurrentFrMatch();
+});
+
+frNextBtn.addEventListener("click", async () => {
+  if (!frMatches.length) return;
+  frCurrentIndex = (frCurrentIndex + 1) % frMatches.length;
+  await highlightCurrentFrMatch();
+});
+
+frFindInput.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    frNextBtn.click();
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    frPrevBtn.click();
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    frFindBtn.click();
+  }
+});
+
+frReplaceBtn.addEventListener("click", async () => {
+  if (frCurrentIndex === -1) return;
+  const find = frFindInput.value;
+  const replace = frReplaceInput.value;
+  const atIndex = frMatches[frCurrentIndex].index;
+
+  frReplaceBtn.disabled = true;
+  frStatus.textContent = "Replacing...";
+  try {
+    const result = await sendToContentScript("APPLY_REPLACE_AT_INDEX", { atIndex, find, replace });
+    if (!result.success) {
+      frStatus.textContent = "Error: " + result.error;
+    } else {
+      frStatus.textContent = `Replaced match on line ${result.line}.`;
+      await refreshEditorState();
+      // Indices shift after any edit — clear the stale match list rather
+      // than risk replacing the wrong occurrence; user can click Find again.
+      frMatches = [];
+      frCurrentIndex = -1;
+      frMatchStatus.textContent = "";
+    }
+  } catch (err) {
+    frStatus.textContent = "Error: " + err.message;
+  } finally {
+    updateFrNav();
+  }
+});
+
+frReplaceAllBtn.addEventListener("click", async () => {
+  const find = frFindInput.value;
+  const replace = frReplaceInput.value;
+  if (!find) {
+    frStatus.textContent = "Enter text to find.";
+    return;
+  }
+
+  frReplaceAllBtn.disabled = true;
+  frStatus.textContent = "Replacing all...";
+  try {
+    const result = await sendToContentScript("APPLY_FIND_REPLACE_ALL", { find, replace, highlight: true });
+    frStatus.textContent = result.success ? `Replaced ${result.count} occurrence(s).` : "Error: " + result.error;
+    if (result.success) await refreshEditorState();
+  } catch (err) {
+    frStatus.textContent = "Error: " + err.message;
+  } finally {
+    frMatches = [];
+    frCurrentIndex = -1;
+    frMatchStatus.textContent = "";
+    updateFrNav();
+    frReplaceAllBtn.disabled = false;
+  }
+});
+
+// ─── Static Tools: Parenthesis Checker ─────────────────────────────
+
+parenCheckBtn.addEventListener("click", async () => {
+  parenResults.innerHTML = '<p class="hint">Checking...</p>';
+  try {
+    const { expression } = await refreshEditorState();
+    if (!expression || !expression.trim()) {
+      parenResults.innerHTML = '<p class="empty-state">Expression is empty.</p>';
+      if (parenHighlightCheckbox.checked) await sendToContentScript("CLEAR_HIGHLIGHT");
+      return;
+    }
+
+    const analyzer = new Analyzer();
+    const result = analyzer.analyze(expression);
+
+    const bracketDiagnostics = result.diagnostics.filter((d) => /parenthesis|bracket|brace/i.test(d.message));
+
+    if (bracketDiagnostics.length === 0) {
+      parenResults.innerHTML = '<p class="empty-state">All parentheses/brackets/braces are matched.</p>';
+      if (parenHighlightCheckbox.checked) await sendToContentScript("CLEAR_HIGHLIGHT");
+      return;
+    }
+
+    parenResults.innerHTML = `
+      <div class="diagnostics-list">
+        ${bracketDiagnostics
+          .map(
+            (d) => `
+              <div class="diagnostic-item error">
+                <span class="diagnostic-icon">⚠️</span>
+                <div class="diagnostic-content">
+                  <div class="diagnostic-message">${escapeHtml(d.message)}</div>
+                </div>
+              </div>
+            `
+          )
+          .join("")}
+      </div>
+    `;
+
+    if (parenHighlightCheckbox.checked) {
+      const target = bracketDiagnostics[0];
+      const hl = await sendToContentScript("HIGHLIGHT_LINE", { line: target.line });
+      if (!hl.success) {
+        parenResults.innerHTML += `<p class="hint">Couldn't highlight in editor: ${escapeHtml(hl.error)}</p>`;
+      }
+    }
+  } catch (err) {
+    parenResults.innerHTML = `<p class="hint">Error: ${escapeHtml(err.message)}</p>`;
+  }
+});
+
+// ─── Static Tools: Auto-Save ────────────────────────────────────────
+
+let autoSaveTimer = null;
+
+function stopAutoSave() {
+  if (autoSaveTimer) {
+    clearInterval(autoSaveTimer);
+    autoSaveTimer = null;
+  }
+}
+
+async function runAutoSave() {
+  const time = new Date().toLocaleTimeString();
+  try {
+    const tab = await getActiveTab();
+    if (!/appiancloud\.com|appian\.community/.test(tab.url || "")) {
+      autoSaveStatus.textContent = `Auto-save on — skipped at ${time}: active tab isn't an Appian page.`;
+      return;
+    }
+    const result = await chrome.tabs
+      .sendMessage(tab.id, { type: "TRIGGER_SAVE" })
+      .catch((err) => ({ success: false, error: err.message }));
+
+    autoSaveStatus.textContent = result?.success
+      ? `Auto-save on — last saved at ${time}.`
+      : `Auto-save on — last attempt at ${time} failed: ${result?.error || "no response from the Appian tab"}`;
+  } catch (err) {
+    autoSaveStatus.textContent = `Auto-save on — last attempt at ${time} failed: ${err.message}`;
+  }
+}
+
+let autoSaveMinutes = 5;
+
+autoSaveIntervalButtons.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    autoSaveIntervalButtons.forEach((b) => b.classList.toggle("active", b === btn));
+    autoSaveMinutes = Number(btn.dataset.minutes);
+    if (autoSaveEnabled.checked) {
+      // Re-arm with the new interval.
+      autoSaveEnabled.dispatchEvent(new Event("change"));
+    }
+  });
+});
+
+autoSaveEnabled.addEventListener("change", () => {
+  stopAutoSave();
+  if (!autoSaveEnabled.checked) {
+    autoSaveStatus.textContent = "Auto-save is off.";
+    return;
+  }
+  autoSaveStatus.textContent = `Auto-save on — will save every ${autoSaveMinutes} minute(s).`;
+  autoSaveTimer = setInterval(runAutoSave, autoSaveMinutes * 60 * 1000);
 });
 
 // ─── Init ───────────────────────────────────────────────────────────
