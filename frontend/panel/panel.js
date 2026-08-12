@@ -3,13 +3,22 @@
  *
  * Flow: read the active tab's current expression + rule inputs ->
  * POST {prompt, rule_inputs, expression} to the backend -> render the
- * response {response, rule_input, bulk_edit, line_by_line_edit}.
+ * response {response, rule_input, bulk_edit, line_by_line_edit, validation,
+ * docsValidationRan}.
  *
  * Contract with the backend (see background.js requestSuggestion):
  *   request:  { prompt, rule_inputs, expression }
- *   response: { response, rule_input, bulk_edit, line_by_line_edit }
- *     rule_input:         [{ old: ruleInputObj|null, new: ruleInputObj }]
- *     line_by_line_edit:  [{ old: string, new: string }]
+ *   response: { response, rule_input, bulk_edit, line_by_line_edit,
+ *               validation, docsValidationRan }
+ *     rule_input:           [{ old: ruleInputObj|null, new: ruleInputObj }]
+ *     line_by_line_edit:    [{ old: string, new: string }]
+ *     validation:           string[] — diagnostics on the generated
+ *                           `bulk_edit`, tagged "[syntax] ..." (a local
+ *                           bracket-balance check that always runs) and,
+ *                           when available, "[docs] ..." (functions/
+ *                           components checked against Appian's Docs MCP).
+ *     docsValidationRan:    bool — whether the Docs MCP check actually
+ *                           ran, vs. only the local syntax check.
  *   ruleInputObj: { name, description, type, array }
  *
  * Expression edits keep their own Bulk / Line-by-line toggle with
@@ -156,7 +165,7 @@ const state = {
   objectName: "",
   expression: "",
   ruleInputs: [],
-  suggestion: null, // { response, rule_input, bulk_edit, line_by_line_edit }
+  suggestion: null, // { response, rule_input, bulk_edit, line_by_line_edit, validation, docsValidationRan }
   mode: "bulk", // expression edit mode: "bulk" | "line"
   lineStatus: [], // per line_by_line_edit entry: "pending" | "accepted" | "rejected"
   lineNavIndex: 0, // which line_by_line_edit entry ▲/▼ navigation currently points at
@@ -176,6 +185,8 @@ const askStatus = document.getElementById("askStatus");
 
 const suggestionSection = document.getElementById("suggestionSection");
 const suggestionResponse = document.getElementById("suggestionResponse");
+const validationStatus = document.getElementById("validationStatus");
+const validationResults = document.getElementById("validationResults");
 const bulkModeBtn = document.getElementById("bulkModeBtn");
 const lineModeBtn = document.getElementById("lineModeBtn");
 const editsContainer = document.getElementById("editsContainer");
@@ -228,7 +239,19 @@ async function getActiveTab() {
 
 async function sendToContentScript(type, extra = {}) {
   const tab = await getActiveTab();
-  const response = await chrome.tabs.sendMessage(tab.id, { type, ...extra });
+  if (!/appiancloud\.com|appian\.community/.test(tab.url || "")) {
+    throw new Error("Open an Appian expression editor tab first — the active tab isn't an Appian page.");
+  }
+
+  let response;
+  try {
+    response = await chrome.tabs.sendMessage(tab.id, { type, ...extra });
+  } catch (err) {
+    if (/Receiving end does not exist/.test(err.message)) {
+      throw new Error("Couldn't reach the Appian tab — refresh it and try again.");
+    }
+    throw err;
+  }
   return response ?? { success: false, error: "No response from content script" };
 }
 
@@ -304,6 +327,63 @@ askBtn.addEventListener("click", async () => {
   }
 });
 
+// ─── Rendering: generated-code validation ───────────────────────────
+//
+// `validation` is a combined list of diagnostics on the AI's generated
+// `bulk_edit`, tagged by source:
+//   "[syntax] ..." — a local, string-aware bracket-balance check
+//     (backend/app/syntax_check.py) that always runs, no live Appian
+//     connection needed. Catches structural mistakes like an unclosed
+//     "{" from a truncated a!richTextItem list.
+//   "[docs] ..." — functions/components referenced in the code checked
+//     against Appian's Docs MCP. This is what catches things the AI can
+//     still hallucinate despite the docs context (e.g. a function name
+//     that doesn't actually exist) — only present when
+//     `docsValidationRan` is true.
+// Severity isn't broken out separately by the backend, so it's inferred
+// here from keywords in the message text.
+function classifyValidationSeverity(message) {
+  const lower = message.toLowerCase();
+  if (lower.includes("error") || lower.includes("unmatched") || lower.includes("unclosed")) return "error";
+  if (lower.includes("warning")) return "warning";
+  return "info";
+}
+
+const VALIDATION_ICON = { error: "⛔", warning: "⚠️", info: "ℹ️" };
+
+function renderValidation(validation, docsValidationRan) {
+  const messages = Array.isArray(validation) ? validation : [];
+
+  if (messages.length === 0) {
+    validationStatus.textContent = docsValidationRan
+      ? "✓ Validated against Appian docs — no issues found."
+      : "✓ No local syntax issues found. (Appian docs validation unavailable — check appian_docs_url/token.)";
+    validationResults.innerHTML = "";
+    return;
+  }
+
+  const hasError = messages.some((m) => classifyValidationSeverity(String(m)) === "error");
+  const suffix = docsValidationRan ? "" : " (Appian docs validation unavailable — local syntax check only.)";
+  validationStatus.textContent = hasError
+    ? `Found ${messages.length} issue(s):${suffix}`
+    : `${messages.length} note(s):${suffix}`;
+
+  validationResults.innerHTML = messages
+    .map((m) => {
+      const text = String(m);
+      const severity = classifyValidationSeverity(text);
+      return `
+        <div class="diagnostic-item ${severity}">
+          <span class="diagnostic-icon">${VALIDATION_ICON[severity]}</span>
+          <div class="diagnostic-content">
+            <div class="diagnostic-message">${escapeHtml(text)}</div>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+}
+
 // ─── Rendering: expression edits ───────────────────────────────────
 
 function renderSuggestion() {
@@ -316,6 +396,7 @@ function renderSuggestion() {
 
   suggestionSection.hidden = false;
   suggestionResponse.textContent = s.response || "";
+  renderValidation(s.validation, s.docsValidationRan);
 
   const hasBulk = typeof s.bulk_edit === "string" && s.bulk_edit.length > 0;
   const hasLine = Array.isArray(s.line_by_line_edit) && s.line_by_line_edit.length > 0;

@@ -15,7 +15,6 @@ async def full_health():
     """Test all connections and report status of each."""
     results = {
         "design_api": await _check_design_api(),
-        "native_mcp": await _check_native_mcp(),
         "docs_mcp": await _check_docs_mcp(),
     }
     results["all_healthy"] = all(r["ok"] for r in results.values())
@@ -26,12 +25,6 @@ async def full_health():
 async def check_design_api():
     """Test connection to Appian Design API (direct REST)."""
     return await _check_design_api()
-
-
-@router.get("/native-mcp")
-async def check_native_mcp():
-    """Test connection to Appian Native MCP (streamable HTTP)."""
-    return await _check_native_mcp()
 
 
 @router.get("/docs-mcp")
@@ -63,32 +56,6 @@ async def _check_design_api() -> dict:
         return {"ok": False, "status": None, "message": f"DNS/Network error: {e}"}
     except Exception as e:
         return {"ok": False, "status": None, "message": f"{type(e).__name__}: {e}"}
-
-
-async def _check_native_mcp() -> dict:
-    """Check: Can we connect to the Appian Native MCP and list tools?"""
-    settings = get_settings()
-    try:
-        headers = {}
-        if settings.appian_native_token:
-            headers["Authorization"] = f"Bearer {settings.appian_native_token}"
-        client = httpx2.AsyncClient(headers=headers, timeout=15.0)
-        async with streamable_http_client(settings.appian_native_url, http_client=client) as (r, w):
-            async with ClientSession(r, w) as session:
-                await session.initialize()
-                tools = await session.list_tools()
-                return {
-                    "ok": True,
-                    "message": f"Connected — {len(tools.tools)} tools available",
-                    "tool_count": len(tools.tools),
-                    "sample_tools": [t.name for t in tools.tools[:5]],
-                }
-    except BaseException as e:
-        # Unwrap ExceptionGroup
-        real_error = e
-        if hasattr(e, "exceptions") and e.exceptions:
-            real_error = e.exceptions[0]
-        return {"ok": False, "message": f"{type(real_error).__name__}: {real_error}"}
 
 
 async def _check_docs_mcp() -> dict:

@@ -1,11 +1,17 @@
 """FastAPI application entry point."""
 
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.health_routes import router as health_router
 from app.ai_routes import router as ai_router
 from app.compat_routes import router as compat_router
 from app.parser_routes import router as parser_router
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 app = FastAPI(
     title="Appian AI Context Service",
