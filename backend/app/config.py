@@ -1,4 +1,11 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings
+
+# Default prompt file lives at repo root
+_DEFAULT_PROMPT_PATH = str(
+    Path(__file__).resolve().parent.parent.parent / "appian_sail_agent_master_prompt.md"
+)
 
 
 class Settings(BaseSettings):
@@ -18,6 +25,9 @@ class Settings(BaseSettings):
     # Google Gemini AI (AI Studio)
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.6-flash"
+
+    # System prompt — path to the master SAIL agent prompt file
+    system_prompt_path: str = _DEFAULT_PROMPT_PATH
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
