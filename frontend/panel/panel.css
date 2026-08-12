@@ -46,6 +46,35 @@ body {
   background: #e74c3c;
 }
 
+/* Top-level tabs */
+.top-tabs {
+  display: flex;
+  position: sticky;
+  top: 41px; /* sits directly under the sticky header */
+  z-index: 9;
+  background: white;
+  border-bottom: 1px solid #e9ecef;
+}
+
+.top-tab-btn {
+  flex: 1;
+  padding: 10px;
+  background: white;
+  color: #6c757d;
+  border: none;
+  border-bottom: 2px solid transparent;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+}
+
+.top-tab-btn.active {
+  color: #2c3e50;
+  border-bottom-color: #2c3e50;
+}
+
 /* Sections */
 .section {
   padding: 12px 16px;
@@ -233,6 +262,64 @@ textarea:focus {
   background: #1a252f;
 }
 
+.text-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #dee2e6;
+  border-radius: 6px;
+  font-size: 12px;
+  margin-bottom: 6px;
+  background: #f8f9fa;
+}
+
+.text-input:focus {
+  outline: none;
+  border-color: #3b82f6;
+  background: white;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #495057;
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+
+.inline-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #495057;
+  margin-bottom: 8px;
+}
+
+.fr-nav {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.fr-nav .btn {
+  margin-top: 0;
+}
+
+.fr-nav-btn {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+}
+
+.inline-field input[type="number"] {
+  width: 64px;
+  padding: 4px 6px;
+  border: 1px solid #dee2e6;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
 /* Detail group */
 .detail-group {
   margin-bottom: 4px;
@@ -278,6 +365,11 @@ textarea:focus {
 
 .diff-card.diff-resolved {
   opacity: 0.6;
+}
+
+.diff-card.diff-current {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 1px #3b82f6;
 }
 
 .diff-old,

@@ -2,7 +2,7 @@
 
 A Chrome browser extension + Python backend that provides AI-powered SAIL code assistance inside Appian's online editors. The AI has full context from Appian documentation (via MCP) and your application's design objects.
 
-## Quick Start
+## Quick Start (Windows)
 
 ### Prerequisites
 
@@ -30,10 +30,6 @@ Edit `.env` and fill in your credentials:
 # Required — your Appian site
 APPIAN_BASE_URL=https://your-site.appiancloud.com
 APPIAN_API_KEY=your-appian-api-key
-
-# Required — Appian Native MCP (same site, /mcp path)
-APPIAN_NATIVE_URL=https://your-site.appiancloud.com/mcp
-APPIAN_NATIVE_TOKEN=your-jwt-token
 
 # Required — Appian Docs MCP (authenticated via OAuth, see step 3)
 APPIAN_DOCS_URL=https://appian-docs-public.mcp.kapa.ai
@@ -101,12 +97,111 @@ The extension connects to `http://localhost:8000` by default. To change this, se
 chrome.runtime.sendMessage({ type: "SET_BACKEND_URL", url: "http://localhost:8000" });
 ```
 
+## Quick Start (macOS)
+
+### Prerequisites
+
+- Python 3.10+ (`python3 --version`)
+- Google AI Studio API key ([get one here](https://aistudio.google.com/apikey))
+- Chrome browser (for the extension)
+
+### 1. Clone and install
+
+```bash
+git clone https://github.com/faithshortappian/penguinhackathon.git
+cd penguinhackathon/backend
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+Remember to `source venv/bin/activate` again in any new terminal tab before running backend commands.
+
+### 2. Configure environment
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and fill in your credentials:
+
+```env
+# Required — your Appian site
+APPIAN_BASE_URL=https://your-site.appiancloud.com
+APPIAN_API_KEY=your-appian-api-key
+
+# Required — Appian Docs MCP (authenticated via OAuth, see step 3)
+APPIAN_DOCS_URL=https://appian-docs-public.mcp.kapa.ai
+APPIAN_DOCS_TOKEN=
+
+# Required — Google Gemini AI
+GEMINI_API_KEY=your-google-ai-studio-key
+GEMINI_MODEL=gemini-3.6-flash
+
+# Optional
+CACHE_TTL_SECONDS=300
+```
+
+### 3. Authenticate with Appian Docs MCP (one-time)
+
+The documentation MCP requires OAuth login via browser:
+
+```bash
+cd backend
+python auth_docs_mcp.py
+```
+
+This opens your browser for Google/GitHub sign-in. After authenticating, tokens are saved to `.tokens/` and reused automatically.
+
+### 4. Start the backend server
+
+```bash
+cd backend
+python -m uvicorn app.main:app --port 8000
+```
+
+Server runs at `http://localhost:8000`. Open `http://localhost:8000/docs` for the Swagger UI.
+
+### 5. Verify it works
+
+```bash
+# Health check
+curl http://localhost:8000/health
+
+# Test AI endpoint
+curl -X POST http://localhost:8000/api/v1/ai/process \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Write a SAIL expression that returns hello world", "code": "", "ruleInputs": []}'
+```
+
+### 6. Install the Chrome extension
+
+1. Open Chrome → `chrome://extensions/`
+2. Enable "Developer mode" (top right)
+3. Click "Load unpacked"
+4. Select the `frontend/` folder
+5. The extension icon appears in your toolbar
+
+The extension connects to `http://localhost:8000` by default. To change this, send a message from the extension's dev console:
+
+```js
+chrome.runtime.sendMessage({ type: "SET_BACKEND_URL", url: "http://localhost:8000" });
+```
+
+### macOS troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| `command not found: py` | Use `python3` (and `python`/`pip` once your venv is activated) — `py` is Windows-only |
+| Port 8000 already in use | Kill existing: `lsof -ti:8000 \| xargs kill -9` |
+| `zsh: permission denied` on scripts | Run via `python3 script.py` rather than executing directly, or `chmod +x script.py` |
+
 ## API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/api/v1/ai/process` | Process SAIL code through AI with Appian context |
-| POST | `/api/v1/ai/process/validate` | Same + validates output via Native MCP |
+| POST | `/api/v1/ai/process/validate` | Same + validates output via Docs MCP |
 | POST | `/api/v1/validate-expression` | Validate expression syntax + references |
 | GET | `/api/v1/app/{uuid}/context` | Get full application context |
 | GET | `/api/v1/health` | Test all backend connections |
@@ -145,7 +240,6 @@ penguinhackathon/
 │   │   ├── ai_client.py         # Google Gemini client
 │   │   ├── compat_routes.py     # Legacy frontend-compatible routes
 │   │   ├── appian_client.py     # Appian Design API client
-│   │   ├── native_client.py     # Appian Native MCP client
 │   │   ├── docs_client.py       # Appian Docs MCP client (OAuth)
 │   │   ├── oauth_storage.py     # Token persistence for OAuth
 │   │   ├── context_service.py   # App context orchestration

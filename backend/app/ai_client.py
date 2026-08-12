@@ -1,11 +1,10 @@
 """AI client using Google Gemini Interactions API for SAIL code processing."""
 
 import json
-import logging
-from pathlib import Path
-
+import re
 from google import genai
 from app.config import get_settings
+from app.syntax_check import check_balanced_brackets
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +98,43 @@ When responding:
 5. If the user provides rule inputs, incorporate them correctly using ri! references.
 {response_format}"""
 
+SAIL conventions (follow strictly):
+- Use lowercase function/component prefixes exactly as Appian defines them (a!, ri!, rule!, const!, recordType!, fv!, save!, pv!) — never invent or guess a prefix.
+- Prefer local variables (a!localVariables()) over repeating the same sub-expression multiple times.
+- Do not use deprecated functions or components; if the docs context flags something as deprecated, use the recommended replacement instead.
+- Match existing naming conventions already present in the user's code or app context rather than introducing new ones.
+- Keep expressions readable: break complex nested a! calls across lines rather than producing a single dense line.
+
+Grounding discipline:
+- Only reference SAIL functions, components, or parameters that either appear in <appian_docs> below or that you are highly confident are core, stable Appian SAIL syntax.
+- If <appian_docs> is empty or does not cover something you need, say so explicitly in the summary (e.g. "no documentation was found for X, verify usage") rather than inventing behavior.
+- Do not fabricate rule!, const!, or recordType! names that are not present in <app_context> — if a needed object doesn't exist there, note in the summary that it needs to be created.
+
+Respond with:
+- "summary": A brief explanation of what was done (1-3 sentences)
+- "code": The processed/improved SAIL expression (valid SAIL code)
+- "ruleInputs": An array of rule input objects, each with "name" and "type" fields"""
+
+    _RESPONSE_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string"},
+            "code": {"type": "string"},
+            "ruleInputs": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "type": {"type": "string"},
+                    },
+                    "required": ["name", "type"],
+                },
+            },
+        },
+        "required": ["summary", "code", "ruleInputs"],
+    }
+
     def _build_user_message(self, code: str, prompt: str, rule_inputs: list[dict]) -> str:
         """Build the user message with code, prompt, and rule inputs."""
         parts = []
@@ -145,6 +181,11 @@ When responding:
             interaction = self.client.interactions.create(
                 model=self.model,
                 input=full_input,
+                response_format={
+                    "type": "text",
+                    "mime_type": "application/json",
+                    "schema": self._RESPONSE_SCHEMA,
+                },
             )
 
             response_text = interaction.output_text
@@ -161,19 +202,34 @@ When responding:
                 cleaned = "\n".join(lines)
 
             result = json.loads(cleaned)
+            final_code = result.get("code", code)
 
             return {
                 "summary": result.get("summary", ""),
-                "code": result.get("code", code),
+                "code": final_code,
                 "ruleInputs": result.get("ruleInputs", rule_inputs),
+                "syntaxWarnings": check_balanced_brackets(final_code),
             }
 
         except json.JSONDecodeError:
-            # If the model didn't return valid JSON, wrap the raw text
+            # Malformed JSON from the model (e.g. a bad escape sequence). Try to
+            # salvage the "code" field with a regex rather than pasting the raw,
+            # still-JSON-shaped response text into the SAIL editor.
+            salvaged_code = None
+            match = re.search(r'"code"\s*:\s*"(.*?)"\s*,\s*"ruleInputs"', response_text, re.DOTALL)
+            if match:
+                try:
+                    salvaged_code = json.loads(f'"{match.group(1)}"')
+                except json.JSONDecodeError:
+                    salvaged_code = None
+
+            final_code = salvaged_code if salvaged_code else code
+
             return {
                 "summary": "AI returned a response but it was not in the expected format.",
-                "code": response_text if response_text else code,
+                "code": final_code,
                 "ruleInputs": rule_inputs,
+                "syntaxWarnings": check_balanced_brackets(final_code),
             }
         except Exception as e:
             raise RuntimeError(f"Gemini API error: {str(e)}") from e
