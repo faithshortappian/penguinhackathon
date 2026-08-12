@@ -91,7 +91,60 @@ async def _gather_docs_context(code: str, prompt: str) -> str:
 
 
 async def _gather_app_context(app_uuid: str | None) -> str:
-    """Fetch application context (record types, rules, constants) if app UUID provided."""
+    """Fetch application context (record types, rules, constants).
+
+    Uses the parsed context store (from ZIP upload) as the primary source.
+    Falls back to the live Appian Design API if app_uuid is provided and
+    no parsed context is available.
+    """
+    # First: try the parsed context store (richer, offline, no API key needed)
+    from app.context_store import is_loaded, get_by_type, get_search_index
+    if is_loaded():
+        try:
+            parts = []
+            rules = get_by_type("Expression Rule")
+            if rules:
+                rules_str = "\n".join(
+                    f"  - rule!{r['name']}({', '.join(i.get('name', '') for i in r.get('inputs', [])[:5])})"
+                    for r in rules[:30]
+                )
+                parts.append(f"Expression Rules ({len(rules)} total, showing first 30):\n{rules_str}")
+
+            constants = get_by_type("Constant")
+            if constants:
+                consts_str = "\n".join(
+                    f"  - const!{c['name']} ({c.get('constant_type', '')})"
+                    for c in constants[:30]
+                )
+                parts.append(f"Constants ({len(constants)} total, showing first 30):\n{consts_str}")
+
+            record_types = get_by_type("Record Type")
+            if record_types:
+                rt_summary = []
+                for rt in record_types[:15]:
+                    fields = rt.get("fields", [])
+                    fields_str = ", ".join(
+                        f.get("name", f.get("field_name", "?")) for f in fields[:8]
+                    )
+                    rt_summary.append(f"  - recordType!{rt['name']}: [{fields_str}]")
+                parts.append(f"Record Types ({len(record_types)} total, showing first 15):\n" + "\n".join(rt_summary))
+
+            interfaces = get_by_type("Interface")
+            if interfaces:
+                ifaces_str = "\n".join(
+                    f"  - rule!{i['name']}({', '.join(inp.get('name', '') for inp in i.get('inputs', [])[:3])})"
+                    for i in interfaces[:20]
+                )
+                parts.append(f"Interfaces ({len(interfaces)} total, showing first 20):\n{ifaces_str}")
+
+            context_str = "\n\n".join(parts)[:8000]
+            if context_str:
+                logger.info("app_context: using parsed context store (%d chars)", len(context_str))
+                return context_str
+        except Exception as e:
+            logger.warning("app_context: parsed context read failed: %s", e)
+
+    # Fallback: live Appian Design API (requires app_uuid + API key)
     if not app_uuid:
         return ""
 

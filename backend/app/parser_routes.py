@@ -146,6 +146,15 @@ async def parse_package(
                     t = obj.object_type
                     orphan_index["by_type"][t] = orphan_index["by_type"].get(t, 0) + 1
 
+            # Save parsed context to disk for the extension to query
+            from app.context_store import save_parsed_context
+            save_parsed_context(
+                parsed_objects=parsed_objects,
+                dependencies=dependencies,
+                source_filename=file.filename or "unknown.zip",
+                bundle_dicts=bundle_dicts,
+            )
+
             summary = ParseResponse(
                 total_files=len(contents.xml_files),
                 objects_parsed=len(parsed_objects),
