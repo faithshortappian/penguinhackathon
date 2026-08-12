@@ -191,31 +191,35 @@ async function fetchAppContext(appUuid) {
 
 /**
  * payload: { prompt, rule_inputs, expression }
- * returns: { response, rule_input, bulk_edit, line_by_line_edit }
+ * returns: { response, rule_input, bulk_edit, line_by_line_edit, validation }
  *
  * Adapter for the real backend contract, which turned out simpler than
  * what the rest of the extension is built around: POST
- * /api/v1/ai/process takes { code, prompt, ruleInputs, appUuid } and
- * returns { summary, code, ruleInputs } — a single full-replacement
- * `code` string (no separate bulk/line-by-line diff format) and a flat
- * ruleInputs list of just { name, type } (no description/array, no
- * old/new pairing — it's the AI's suggested full set, not a diff). This
- * function is the one place that gap is bridged, translating both
+ * /api/v1/ai/process/validate takes { code, prompt, ruleInputs, appUuid }
+ * and returns { summary, code, ruleInputs, validation } — a single
+ * full-replacement `code` string (no separate bulk/line-by-line diff
+ * format), a flat ruleInputs list of just { name, type } (no
+ * description/array, no old/new pairing — it's the AI's suggested full
+ * set, not a diff), and `validation`, the result of checking the
+ * generated code's functions/components against Appian's Docs MCP —
+ * this is what catches things a pure doc-RAG-grounded LLM can still
+ * hallucinate (e.g. a function name that doesn't actually exist).
+ * This function is the one place that gap is bridged, translating both
  * directions, so panel.js can keep working against the original
- * { response, rule_input, bulk_edit, line_by_line_edit } shape
- * unchanged. line_by_line_edit is always empty since the backend never
- * produces one — the Suggestion section's mode toggle already hides
- * itself when that's the case. rule_input only ever contains additions
- * (old: null) — an input name the backend already knows about is
- * treated as unchanged, since there's no old/new pairing to detect a
- * rename from. If the backend later grows to return more of the
- * original shape natively, only this function needs to change.
+ * { response, rule_input, bulk_edit, line_by_line_edit } shape plus the
+ * new validation field. line_by_line_edit is always empty since the
+ * backend never produces one — the Suggestion section's mode toggle
+ * already hides itself when that's the case. rule_input only ever
+ * contains additions (old: null) — an input name the backend already
+ * knows about is treated as unchanged, since there's no old/new pairing
+ * to detect a rename from. If the backend later grows to return more of
+ * the original shape natively, only this function needs to change.
  */
 async function requestSuggestion(payload) {
   const backendUrl = await getBackendUrl();
   const currentRuleInputs = payload.rule_inputs || [];
 
-  const resp = await fetch(`${backendUrl}/api/v1/ai/process`, {
+  const resp = await fetch(`${backendUrl}/api/v1/ai/process/validate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -241,6 +245,8 @@ async function requestSuggestion(payload) {
     bulk_edit: result.code || "",
     line_by_line_edit: [],
     rule_input,
+    validation: result.validation ?? [],
+    docsValidationRan: result.docsValidationRan ?? false,
   };
 }
 

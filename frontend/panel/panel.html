@@ -84,7 +84,11 @@
       <!-- Suggestion (hidden until a response arrives) -->
       <section class="section" id="suggestionSection" hidden>
         <h2>Suggestion</h2>
+        <p class="hint">What the AI did:</p>
         <p class="summary-text" id="suggestionResponse"></p>
+
+        <p class="hint" id="validationStatus"></p>
+        <div class="diagnostics-list" id="validationResults"></div>
 
         <div class="mode-toggle" id="modeToggle">
           <button class="mode-btn active" data-mode="bulk" id="bulkModeBtn">Bulk</button>

@@ -5,6 +5,7 @@ Run `py auth_docs_mcp.py` once to complete the login flow.
 Tokens are then persisted and reused automatically.
 """
 
+import logging
 import httpx2
 from mcp import ClientSession
 from mcp.client.auth import OAuthClientProvider
@@ -13,6 +14,8 @@ from mcp.shared.auth import OAuthClientMetadata
 from pydantic import AnyUrl
 from app.config import get_settings
 from app.oauth_storage import FileTokenStorage
+
+logger = logging.getLogger("app.docs_client")
 
 CALLBACK_URL = "http://localhost:3030/callback"
 
@@ -67,16 +70,21 @@ class AppianDocsClient:
 
     async def _connect_and_call(self, tool_name: str, arguments: dict) -> dict:
         """Try OAuth first, fall back to raw token if OAuth storage is empty."""
+        logger.info("docs MCP: calling tool=%r arguments=%r", tool_name, arguments)
+
         # Check if we have OAuth tokens stored
         stored_tokens = await self._storage.get_tokens()
 
         if stored_tokens:
             # Use OAuth flow (tokens auto-refresh)
             http_client = self._make_http_client()
+            logger.debug("docs MCP: authenticating via stored OAuth tokens")
         elif self.token:
             # Fall back to raw Bearer token from .env
             http_client = self._make_http_client_fallback()
+            logger.debug("docs MCP: authenticating via configured Bearer token")
         else:
+            logger.error("docs MCP: no authentication configured")
             raise RuntimeError(
                 "No authentication configured for Docs MCP. "
                 "Run `py auth_docs_mcp.py` to authenticate via browser."
@@ -92,7 +100,13 @@ class AppianDocsClient:
                         content_parts.append(content.text)
                     elif hasattr(content, "data"):
                         content_parts.append(str(content.data))
-                return {"content": content_parts, "isError": result.isError}
+                logger.info(
+                    "docs MCP: tool=%r returned isError=%s content_parts=%d",
+                    tool_name,
+                    result.is_error,
+                    len(content_parts),
+                )
+                return {"content": content_parts, "isError": result.is_error}
 
     async def list_tools(self) -> list[dict]:
         """Discover available tools on the docs MCP server."""

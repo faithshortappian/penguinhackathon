@@ -7,10 +7,6 @@ class Settings(BaseSettings):
     appian_api_key: str = ""
     cache_ttl_seconds: int = 300  # 5 minute cache
 
-    # Appian Native MCP (HTTP endpoint)
-    appian_native_url: str = "https://your-site.appiancloud.com/mcp"
-    appian_native_token: str = ""
-
     # Appian Docs MCP (HTTP endpoint)
     appian_docs_url: str = "https://appian-docs-api.mcp.kapa.ai"
     appian_docs_token: str = ""

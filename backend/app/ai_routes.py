@@ -6,13 +6,15 @@ processes through Bedrock AI, and returns the result.
 """
 
 import asyncio
-import json
+import logging
+import re
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from app.ai_client import get_ai_client
 from app.docs_client import get_docs_client
-from app.native_client import get_native_client
 from app.context_service import ContextService
+
+logger = logging.getLogger("app.ai")
 
 router = APIRouter(prefix="/api/v1/ai")
 context_service = ContextService()
@@ -57,18 +59,35 @@ async def _gather_docs_context(code: str, prompt: str) -> str:
             search_query += " " + " ".join(functions[:5])  # Limit to 5
 
     if not search_query.strip():
+        logger.info("docs_context: skipped (empty search query)")
         return ""
+
+    query = search_query.strip()[:200]
+    logger.info("docs_context: searching Appian docs for query=%r", query)
 
     try:
         # Search docs for relevant content
-        search_result = await docs_client.search(search_query.strip()[:200])
+        search_result = await docs_client.search(query)
         if search_result and not search_result.get("isError"):
             for part in search_result.get("content", []):
                 context_parts.append(part)
+            logger.info(
+                "docs_context: found %d result part(s) for query=%r",
+                len(context_parts),
+                query,
+            )
+        else:
+            logger.warning(
+                "docs_context: docs MCP returned an error for query=%r (result=%r)",
+                query,
+                search_result,
+            )
     except Exception:
-        pass  # Non-critical — proceed without docs if MCP is unavailable
+        logger.exception("docs_context: docs MCP search failed for query=%r", query)
 
-    return "\n\n".join(context_parts)[:8000]  # Cap context size
+    context = "\n\n".join(context_parts)[:8000]  # Cap context size
+    logger.info("docs_context: using %d chars of docs context", len(context))
+    return context
 
 
 async def _gather_app_context(app_uuid: str | None) -> str:
@@ -115,35 +134,50 @@ async def _gather_app_context(app_uuid: str | None) -> str:
         return ""  # Non-critical — proceed without app context
 
 
-async def _validate_with_native_mcp(code: str) -> str:
-    """Optionally validate the code using the Appian Native MCP."""
+async def _validate_with_docs_mcp(code: str) -> list[str] | None:
+    """Sanity-check the functions/components referenced in the code against
+    the Appian Docs MCP, flagging any that don't turn up documentation.
+
+    Returns None when the Docs MCP isn't configured/reachable (distinct
+    from an empty list, which means it ran and found nothing to flag) so
+    callers can tell "not checked" apart from "checked, no issues".
+    """
     if not code.strip():
-        return ""
+        return None
 
-    try:
-        native_client = get_native_client()
-        result = await native_client.validate_expression(code)
-        if result and not result.get("isError"):
-            return json.dumps(result.get("content", []))
-    except Exception:
-        pass
+    functions = sorted(set(re.findall(r'([a-z]![\w]+)', code)))
+    if not functions:
+        return []
 
-    return ""
+    docs_client = get_docs_client()
+    diagnostics = []
+    checked_any = False
+
+    for name in functions[:10]:  # cap doc lookups per request
+        try:
+            result = await docs_client.get_function_docs(name)
+        except Exception:
+            continue
+
+        checked_any = True
+        if not result or result.get("isError"):
+            diagnostics.append(f"Could not verify {name} against Appian docs.")
+            continue
+
+        content = "\n".join(str(part) for part in result.get("content", []))
+        if name not in content:
+            diagnostics.append(
+                f"{name} was not found in Appian documentation — verify it's a real function/component."
+            )
+
+    return diagnostics if checked_any else None
 
 
 # ─── Main Endpoint ───────────────────────────────────────────────
 
-@router.post("/process", response_model=ProcessResponse)
-async def process_expression(request: ProcessRequest):
-    """
-    Process a SAIL expression through AI with full Appian context.
-
-    Flow:
-    1. Gather documentation context from Appian Docs MCP
-    2. Gather application context (record types, rules, constants)
-    3. Send code + prompt + context to Bedrock AI
-    4. Return processed result (summary, code, ruleInputs)
-    """
+async def _process(request: ProcessRequest) -> dict:
+    """Shared AI-processing step: gather context, call the model, return the
+    raw result dict (summary, code, ruleInputs, syntaxWarnings)."""
     # Gather context in parallel (with timeouts so MCP issues don't block the AI call)
     try:
         docs_context, app_context = await asyncio.wait_for(
@@ -157,10 +191,9 @@ async def process_expression(request: ProcessRequest):
         docs_context = ""
         app_context = ""
 
-    # Process through AI
     ai_client = get_ai_client()
     try:
-        result = await ai_client.process_expression(
+        return await ai_client.process_expression(
             code=request.code,
             prompt=request.prompt,
             rule_inputs=[ri.model_dump() for ri in request.ruleInputs],
@@ -170,7 +203,20 @@ async def process_expression(request: ProcessRequest):
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-    # Map response back to typed model
+
+@router.post("/process", response_model=ProcessResponse)
+async def process_expression(request: ProcessRequest):
+    """
+    Process a SAIL expression through AI with full Appian context.
+
+    Flow:
+    1. Gather documentation context from Appian Docs MCP
+    2. Gather application context (record types, rules, constants)
+    3. Send code + prompt + context to Bedrock AI
+    4. Return processed result (summary, code, ruleInputs)
+    """
+    result = await _process(request)
+
     return ProcessResponse(
         summary=result["summary"],
         code=result["code"],
@@ -184,18 +230,26 @@ async def process_expression(request: ProcessRequest):
 @router.post("/process/validate", response_model=dict)
 async def process_and_validate(request: ProcessRequest):
     """
-    Same as /process but also validates the AI output against Appian Native MCP.
-    Returns the processed result plus validation diagnostics.
+    Same as /process but also validates the AI output: a local, string-aware
+    bracket-balance check (see syntax_check.py) that runs unconditionally, and
+    — when the Docs MCP is configured and reachable — a check that every
+    function/component referenced in the code actually turns up in Appian's
+    documentation. Returns the processed result plus a combined `validation`
+    list of diagnostics from both.
     """
-    # First, process through AI
-    process_response = await process_expression(request)
+    result = await _process(request)
+    code = result["code"]
 
-    # Then validate the generated code
-    validation = await _validate_with_native_mcp(process_response.code)
+    syntax_warnings = [f"[syntax] {w}" for w in result.get("syntaxWarnings", [])]
+
+    docs_result = await _validate_with_docs_mcp(code)
+    docs_ran = docs_result is not None
+    docs_diagnostics = [f"[docs] {d}" for d in (docs_result or [])]
 
     return {
-        "summary": process_response.summary,
-        "code": process_response.code,
-        "ruleInputs": [ri.model_dump() for ri in process_response.ruleInputs],
-        "validation": json.loads(validation) if validation else None,
+        "summary": result["summary"],
+        "code": code,
+        "ruleInputs": result["ruleInputs"],
+        "validation": syntax_warnings + docs_diagnostics,
+        "docsValidationRan": docs_ran,
     }
