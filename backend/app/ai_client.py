@@ -6,6 +6,30 @@ from google import genai
 from app.config import get_settings
 from app.syntax_check import check_balanced_brackets
 
+logger = logging.getLogger(__name__)
+
+# Cache the master prompt content at module level (loaded once)
+_master_prompt_cache: str | None = None
+
+
+def _load_master_prompt() -> str:
+    """Load the SAIL agent master prompt from disk. Cached after first read."""
+    global _master_prompt_cache
+    if _master_prompt_cache is not None:
+        return _master_prompt_cache
+
+    settings = get_settings()
+    prompt_path = Path(settings.system_prompt_path)
+
+    if prompt_path.exists():
+        _master_prompt_cache = prompt_path.read_text(encoding="utf-8")
+        logger.info("Loaded master system prompt from %s (%d chars)", prompt_path, len(_master_prompt_cache))
+    else:
+        logger.warning("Master prompt file not found at %s — using fallback prompt", prompt_path)
+        _master_prompt_cache = ""
+
+    return _master_prompt_cache
+
 
 class AIClient:
     """Handles LLM interactions via Google Gemini (AI Studio)."""
@@ -16,18 +40,55 @@ class AIClient:
         self.model = settings.gemini_model
 
     def _build_system_prompt(self, docs_context: str, app_context: str) -> str:
-        """Build the system prompt with Appian documentation and app context."""
-        return f"""You are an expert Appian SAIL developer. You help users write, fix, and improve SAIL expressions and interfaces.
+        """Build the system prompt combining the master SAIL prompt with live context."""
+        master_prompt = _load_master_prompt()
 
-You have access to the following Appian documentation context:
+        # Live context sections injected alongside the master prompt
+        context_section = ""
+        if docs_context:
+            context_section += f"""
 <appian_docs>
 {docs_context}
 </appian_docs>
-
-You also have context about the user's Appian application:
+"""
+        if app_context:
+            context_section += f"""
 <app_context>
 {app_context}
 </app_context>
+"""
+
+        # Response format instructions (required for structured backend parsing)
+        response_format = """
+## Response Format (REQUIRED — the extension parses this programmatically)
+
+Your response MUST be valid JSON with exactly these fields:
+- "summary": A brief explanation of what was done (1-3 sentences)
+- "code": The complete SAIL expression (valid SAIL code, not a fragment)
+- "ruleInputs": An array of rule input objects, each with "name" and "type" fields
+
+Do NOT include markdown code fences or any other text outside the JSON object.
+For category C (explain) or E (lookup) requests where no code change is needed,
+return the original code unchanged in the "code" field and put the explanation
+in "summary"."""
+
+        if master_prompt:
+            # Full master prompt with live context appended
+            return f"""{master_prompt}
+
+---
+
+## Live Context for This Request
+
+The following documentation and application context was retrieved via MCP for this specific request:
+{context_section}
+{response_format}"""
+        else:
+            # Fallback if master prompt file is missing
+            return f"""You are an expert Appian SAIL developer. You help users write, fix, and improve SAIL expressions and interfaces.
+
+You have access to the following context:
+{context_section}
 
 When responding:
 1. Always return valid SAIL code.
@@ -35,6 +96,7 @@ When responding:
 3. Follow Appian best practices for performance and readability.
 4. Explain what you changed in the summary.
 5. If the user provides rule inputs, incorporate them correctly using ri! references.
+{response_format}"""
 
 SAIL conventions (follow strictly):
 - Use lowercase function/component prefixes exactly as Appian defines them (a!, ri!, rule!, const!, recordType!, fv!, save!, pv!) — never invent or guess a prefix.
