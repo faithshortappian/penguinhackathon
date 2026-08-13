@@ -1,7 +1,9 @@
 """AI client using Google Gemini Interactions API for SAIL code processing."""
 
 import json
+import logging
 import re
+from pathlib import Path
 from google import genai
 from app.config import get_settings
 from app.syntax_check import check_balanced_brackets
@@ -96,7 +98,6 @@ When responding:
 3. Follow Appian best practices for performance and readability.
 4. Explain what you changed in the summary.
 5. If the user provides rule inputs, incorporate them correctly using ri! references.
-{response_format}"""
 
 SAIL conventions (follow strictly):
 - Use lowercase function/component prefixes exactly as Appian defines them (a!, ri!, rule!, const!, recordType!, fv!, save!, pv!) — never invent or guess a prefix.
@@ -109,11 +110,7 @@ Grounding discipline:
 - Only reference SAIL functions, components, or parameters that either appear in <appian_docs> below or that you are highly confident are core, stable Appian SAIL syntax.
 - If <appian_docs> is empty or does not cover something you need, say so explicitly in the summary (e.g. "no documentation was found for X, verify usage") rather than inventing behavior.
 - Do not fabricate rule!, const!, or recordType! names that are not present in <app_context> — if a needed object doesn't exist there, note in the summary that it needs to be created.
-
-Respond with:
-- "summary": A brief explanation of what was done (1-3 sentences)
-- "code": The processed/improved SAIL expression (valid SAIL code)
-- "ruleInputs": An array of rule input objects, each with "name" and "type" fields"""
+{response_format}"""
 
     _RESPONSE_SCHEMA = {
         "type": "object",
