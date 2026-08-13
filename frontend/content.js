@@ -69,11 +69,58 @@
     return text.slice(0, index).split("\n").length;
   }
 
+  // Find & Replace's case-sensitivity toggle (off by default). Folding
+  // both sides to lowercase for the search is fine for the ASCII
+  // SAIL-expression content this deals with — it preserves string
+  // length, so the resulting index lines up with the real (original-
+  // case) text. The matched substring's actual case is never touched;
+  // only what gets searched FOR changes.
+  function findIndex(haystack, needle, fromIndex, caseSensitive) {
+    if (caseSensitive) return haystack.indexOf(needle, fromIndex);
+    return haystack.toLowerCase().indexOf(needle.toLowerCase(), fromIndex);
+  }
+
   // 0-indexed {line, ch} CodeMirror position for a character offset.
   function positionAtIndex(text, index) {
     const before = text.slice(0, index);
     const lines = before.split("\n");
     return { line: lines.length - 1, ch: lines[lines.length - 1].length };
+  }
+
+  // Fallback for APPLY_TEXT_REPLACEMENT when an exact substring match
+  // fails: searches line-by-line ignoring each line's leading
+  // whitespace (same normalization computeLineDiff uses internally in
+  // panel.js), then maps the match back to real character offsets in
+  // the actual (unstripped) text. An exact match can fail even when the
+  // content itself hasn't meaningfully changed — e.g. if Appian
+  // reindents the expression on its own (such as when Auto-Save
+  // triggers a real Save) between when the diff was computed and when
+  // a section gets accepted.
+  function findLinesIgnoringIndent(haystack, needle) {
+    if (!needle) return { startIndex: 0, endIndex: 0 };
+    const stripIndent = (line) => line.replace(/^[ \t]+/, "");
+    const haystackLines = haystack.split("\n");
+    const haystackNorm = haystackLines.map(stripIndent);
+    const needleLines = needle.split("\n").map(stripIndent);
+
+    for (let start = 0; start <= haystackNorm.length - needleLines.length; start++) {
+      let matches = true;
+      for (let k = 0; k < needleLines.length; k++) {
+        if (haystackNorm[start + k] !== needleLines[k]) {
+          matches = false;
+          break;
+        }
+      }
+      if (!matches) continue;
+
+      let startIndex = 0;
+      for (let k = 0; k < start; k++) startIndex += haystackLines[k].length + 1;
+      let endIndex = startIndex;
+      for (let k = start; k < start + needleLines.length; k++) endIndex += haystackLines[k].length + 1;
+      endIndex -= 1; // exclude the trailing newline after the last matched line
+      return { startIndex, endIndex };
+    }
+    return null;
   }
 
   // Prefer the debugger-based accurate read (see readExpressionValue's
@@ -132,7 +179,11 @@
       }
       getAccurateExpressionText(root)
         .then(async (text) => {
-          const idx = text.indexOf(message.text);
+          let idx = text.indexOf(message.text);
+          if (idx === -1) {
+            const healed = findLinesIgnoringIndent(text, message.text);
+            idx = healed ? healed.startIndex : -1;
+          }
           if (idx === -1) {
             sendResponse({ success: false, error: "Could not locate this text in the current expression." });
             return;
@@ -164,12 +215,28 @@
 
           for (const item of items) {
             const actual = currentText.slice(item.atIndex, item.atIndex + (item.deleteCount || 0));
-            if (item.expectedText !== undefined && actual !== item.expectedText) {
-              sendResponse({
-                success: false,
-                error: "The expression changed since the check ran — click Check Current Expression again.",
-              });
-              return;
+            if (item.expectedText && actual !== item.expectedText) {
+              // The precomputed offset doesn't match anymore — usually a
+              // sign of small cumulative drift (an earlier edit in this
+              // same session landing a character or two off from what
+              // was predicted), not that the document actually changed
+              // in a way that invalidates this specific edit. Self-heal
+              // by searching for the expected text instead of failing
+              // outright, but only when it's long enough to be a real
+              // anchor — the parenthesis fixer's expectedText is often a
+              // single bracket character, and indexOf(")") would match
+              // almost anywhere in the document, healing to a
+              // completely unrelated character instead of the one that
+              // was actually flagged.
+              const found = item.expectedText.length >= 4 ? currentText.indexOf(item.expectedText) : -1;
+              if (found === -1) {
+                sendResponse({
+                  success: false,
+                  error: "The expression changed since the check ran — click Check Current Expression again.",
+                });
+                return;
+              }
+              item.atIndex = found;
             }
           }
 
@@ -239,11 +306,12 @@
       }
       getAccurateExpressionText(root)
         .then((text) => {
+          const caseSensitive = !!message.caseSensitive;
           const matches = [];
-          let idx = text.indexOf(message.find);
+          let idx = findIndex(text, message.find, 0, caseSensitive);
           while (idx !== -1) {
             matches.push({ index: idx, line: lineNumberAtIndex(text, idx) });
-            idx = text.indexOf(message.find, idx + message.find.length);
+            idx = findIndex(text, message.find, idx + message.find.length, caseSensitive);
           }
           sendResponse({ success: true, matches, text });
         })
@@ -259,14 +327,67 @@
       }
       getAccurateExpressionText(root)
         .then(async (currentText) => {
-          const { atIndex, find, replace } = message;
-          if (currentText.slice(atIndex, atIndex + find.length) !== find) {
+          const { atIndex, find, replace, caseSensitive } = message;
+          const actualAtIndex = currentText.slice(atIndex, atIndex + find.length);
+          const stillMatches = caseSensitive
+            ? actualAtIndex === find
+            : actualAtIndex.toLowerCase() === find.toLowerCase();
+          if (!stillMatches) {
             sendResponse({ success: false, error: "The expression changed since Find — click Find again." });
             return;
           }
           const from = positionAtIndex(currentText, atIndex);
           const to = positionAtIndex(currentText, atIndex + find.length);
           const result = await applyRangeEditViaKeystrokes([{ from, to }], replace);
+          sendResponse({ ...result, line: from.line + 1 });
+        })
+        .catch((err) => sendResponse({ success: false, error: err.message }));
+      return true;
+    }
+
+    if (message.type === "APPLY_TEXT_REPLACEMENT") {
+      // Section-by-section editing's apply path: search the LIVE
+      // document fresh for findText, right now, rather than trusting a
+      // precomputed position — self-correcting regardless of what else
+      // has changed elsewhere in the document (including from other
+      // sections already accepted this session).
+      const root = findMainEditor();
+      if (!root) {
+        sendResponse({ success: false, error: "No expression editor found on this page" });
+        return true;
+      }
+      getAccurateExpressionText(root)
+        .then(async (currentText) => {
+          const { findText, replacement } = message;
+          let startIndex;
+          let endIndex;
+
+          if (!findText) {
+            startIndex = 0;
+            endIndex = 0;
+          } else {
+            const exactIdx = currentText.indexOf(findText);
+            if (exactIdx !== -1) {
+              startIndex = exactIdx;
+              endIndex = exactIdx + findText.length;
+            } else {
+              const healed = findLinesIgnoringIndent(currentText, findText);
+              if (!healed) {
+                sendResponse({
+                  success: false,
+                  error:
+                    "Could not find this section's text in the current expression — it may already be up to date.",
+                });
+                return;
+              }
+              startIndex = healed.startIndex;
+              endIndex = healed.endIndex;
+            }
+          }
+
+          const from = positionAtIndex(currentText, startIndex);
+          const to = positionAtIndex(currentText, endIndex);
+          const result = await applyRangeEditViaKeystrokes([{ from, to }], replacement);
           sendResponse({ ...result, line: from.line + 1 });
         })
         .catch((err) => sendResponse({ success: false, error: err.message }));
@@ -281,17 +402,16 @@
       }
       getAccurateExpressionText(root)
         .then(async (currentText) => {
-          const { find, replace } = message;
-          if (!currentText.includes(find)) {
-            sendResponse({ success: false, error: `Could not find text to replace: ${JSON.stringify(find)}` });
-            return;
-          }
-
+          const { find, replace, caseSensitive } = message;
           const indices = [];
-          let idx = currentText.indexOf(find);
+          let idx = findIndex(currentText, find, 0, caseSensitive);
           while (idx !== -1) {
             indices.push(idx);
-            idx = currentText.indexOf(find, idx + find.length);
+            idx = findIndex(currentText, find, idx + find.length, caseSensitive);
+          }
+          if (indices.length === 0) {
+            sendResponse({ success: false, error: `Could not find text to replace: ${JSON.stringify(find)}` });
+            return;
           }
 
           if (message.highlight) {

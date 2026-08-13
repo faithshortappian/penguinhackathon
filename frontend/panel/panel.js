@@ -50,28 +50,44 @@ import { Tokenizer, TokenType } from "../parser/tokenizer.js";
 // The real backend (see background.js requestSuggestion) only ever
 // returns a single full-replacement `code` string — it has no concept
 // of a per-line diff, so line_by_line_edit always comes back empty and
-// Line-by-line mode has nothing to show. computeLineDiff fills that gap
-// on the frontend: a standard LCS-based line diff between the old
-// expression and the new bulk_edit, producing hunks in the same shape
-// the rest of this file already expects ({ old, new }), but ALSO
-// carrying precise character offsets (atIndex/deleteCount/insertText/
-// expectedText) so each hunk can be applied via the same precise
-// range-edit mechanism built for the parenthesis fixer
-// (APPLY_MULTI_CHAR_EDITS) rather than the older, less reliable
-// substring search (APPLY_LINE_EDIT), which could misfire if the same
-// line of text happens to appear more than once in the expression.
+// Section by section mode has nothing to show. computeLineDiff fills
+// that gap on the frontend: a standard LCS-based line diff between the
+// old expression and the new bulk_edit.
+//
+// Each hunk is applied search-based (findText -> replacement, resolved
+// fresh against the LIVE document at the moment Accept is clicked — see
+// APPLY_TEXT_REPLACEMENT in content.js), not via precomputed character
+// offsets. An earlier offset-based version tried to keep every other
+// pending hunk's position in sync by shifting it whenever one was
+// accepted, on the assumption that a typed edit changes the document by
+// exactly insertText.length - deleteCount characters — but that
+// assumption broke in practice (typing can introduce small drift even
+// with the auto-close-bracket/auto-indent suppression in place), and
+// once one offset drifted, everything after it did too. Searching fresh
+// every time is self-correcting: as long as the section's text is still
+// findable in the document, it doesn't matter what else has changed.
 function computeLineDiff(oldText, newText) {
   if (oldText === newText) return [];
 
-  const oldLines = oldText.split("\n");
-  const newLines = newText.split("\n");
+  // dispatchText (cdp-typer.js) strips leading whitespace from every
+  // line as it types — indentation is left entirely to Appian's own
+  // auto-format button, not tracked here at all. So the diff has to
+  // compare lines ignoring indentation too: without this, re-running
+  // the diff after accepting a hunk would keep seeing that now-
+  // unindented live line as "different" from the (still indented) raw
+  // target line forever, and the hunk would never actually disappear.
+  const stripIndent = (line) => line.replace(/^[ \t]+/, "");
+
+  const oldLines = oldText.split("\n"); // raw — real offsets/expectedText need the real text
+  const newLines = newText.split("\n").map(stripIndent); // pre-stripped — this is what actually gets typed
+  const oldLinesNorm = oldLines.map(stripIndent); // used only for equality checks below
   const n = oldLines.length;
   const m = newLines.length;
 
   const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
   for (let i = n - 1; i >= 0; i--) {
     for (let j = m - 1; j >= 0; j--) {
-      dp[i][j] = oldLines[i] === newLines[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      dp[i][j] = oldLinesNorm[i] === newLines[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
     }
   }
 
@@ -79,7 +95,7 @@ function computeLineDiff(oldText, newText) {
   let i = 0;
   let j = 0;
   while (i < n && j < m) {
-    if (oldLines[i] === newLines[j]) {
+    if (oldLinesNorm[i] === newLines[j]) {
       ops.push({ type: "equal" });
       i++;
       j++;
@@ -110,51 +126,120 @@ function computeLineDiff(oldText, newText) {
   }
   oldLineStart.push(acc);
 
-  const hunks = [];
+  // First pass: raw hunks as [oldStart, oldEnd) / [newStart, newEnd)
+  // line-index ranges — a strict LCS grouping, one hunk per maximal run
+  // of consecutive delete/insert ops.
+  const rawHunks = [];
   let k = 0;
   let oldLineIndex = 0;
+  let newLineIndex = 0;
   while (k < ops.length) {
     if (ops[k].type === "equal") {
       oldLineIndex++;
+      newLineIndex++;
       k++;
       continue;
     }
 
-    const startLine = oldLineIndex;
-    const deleted = [];
-    const inserted = [];
+    const oldStart = oldLineIndex;
+    const newStart = newLineIndex;
     while (k < ops.length && ops[k].type !== "equal") {
-      if (ops[k].type === "delete") {
-        deleted.push(ops[k].line);
-        oldLineIndex++;
-      } else {
-        inserted.push(ops[k].line);
-      }
+      if (ops[k].type === "delete") oldLineIndex++;
+      else newLineIndex++;
       k++;
     }
+    rawHunks.push({ oldStart, oldEnd: oldLineIndex, newStart, newEnd: newLineIndex });
+  }
 
-    const atEnd = startLine >= n;
-    const startIndex = atEnd ? oldText.length : oldLineStart[startLine];
-    const endLine = startLine + deleted.length;
-    const endIndex = deleted.length === 0 ? startIndex : endLine < n ? oldLineStart[endLine] : oldText.length;
+  // Second pass: this is "section by section," not literal line-by-
+  // line. Two reasons to merge two raw hunks into one section:
+  //
+  //  1. Every line between them is blank — a much more reliable signal
+  //     of an actual section boundary than an arbitrary line count. (A
+  //     flat line-count threshold, tried earlier, was far too
+  //     aggressive: real AI rewrites change something every few lines,
+  //     so "merge within 2 unrelated lines" fused nearly the entire
+  //     expression into one giant blob and broke navigation entirely.)
+  //
+  //  2. Either hunk is a pure insertion (oldStart === oldEnd — nothing
+  //     deleted) and they're within reach of each other. A pure
+  //     insertion has no "old" text of its own to search for at apply
+  //     time, so it anchors on a couple of lines of nearby unchanged
+  //     context instead (see the hunk-building loop below). If another
+  //     section sits close enough, that borrowed context can overlap
+  //     the other section's own range — the same text would then
+  //     belong to two different sections, and applying one could
+  //     invalidate the other's ability to find its target at all.
+  //     Merging removes the borrowing entirely: the context becomes
+  //     content the single merged section actually owns.
+  const INSERTION_ADJACENCY_LINES = 2;
+  const sections = [];
+  for (const raw of rawHunks) {
+    const prev = sections[sections.length - 1];
+    let shouldMerge = false;
+    if (prev) {
+      const gapLines = oldLines.slice(prev.oldEnd, raw.oldStart);
+      const gapIsAllBlank = gapLines.length > 0 && gapLines.every((line) => line.trim() === "");
+      const eitherIsInsertion = prev.oldStart === prev.oldEnd || raw.oldStart === raw.oldEnd;
+      const withinInsertionReach = raw.oldStart - prev.oldEnd <= INSERTION_ADJACENCY_LINES;
+      shouldMerge = gapIsAllBlank || (eitherIsInsertion && withinInsertionReach);
+    }
+    if (shouldMerge) {
+      prev.oldEnd = raw.oldEnd;
+      prev.newEnd = raw.newEnd;
+    } else {
+      sections.push({ ...raw });
+    }
+  }
 
-    let insertText = inserted.join("\n");
-    if (deleted.length === 0 && inserted.length > 0) {
-      // Pure insertion — anchor as its own new line rather than merging
-      // into whatever's already sitting at this position.
-      insertText = atEnd ? "\n" + insertText : insertText + "\n";
+  const hunks = sections.map((section) => {
+    const { oldStart, oldEnd, newStart, newEnd } = section;
+    const deletedLines = oldLines.slice(oldStart, oldEnd);
+    const insertedLines = newLines.slice(newStart, newEnd); // already stripped
+    const insertedBlock = insertedLines.join("\n");
+    const atEnd = oldStart >= n;
+
+    let findText;
+    let replacement;
+
+    if (deletedLines.length > 0) {
+      // A real replacement — search for the raw (unstripped) old text
+      // itself. This is the common case.
+      findText = deletedLines.join("\n");
+      replacement = insertedBlock;
+    } else {
+      // Pure insertion — there's no "old" text at this position to
+      // search for, so anchor on a bit of nearby unchanged context
+      // instead (up to 2 real lines) and splice the new content next
+      // to it. Anchoring on more than one line gives indexOf a better
+      // chance of landing on a unique match than a single, possibly
+      // very short or blank, line would.
+      if (atEnd) {
+        if (n === 0) {
+          // The whole original expression was empty — nothing to
+          // anchor on; this can only be the very first edit applied.
+          findText = "";
+          replacement = insertedBlock;
+        } else {
+          const anchor = oldLines.slice(Math.max(0, n - 2), n).join("\n");
+          findText = anchor;
+          replacement = anchor + "\n" + insertedBlock;
+        }
+      } else {
+        const anchor = oldLines.slice(oldStart, Math.min(n, oldStart + 2)).join("\n");
+        findText = anchor;
+        replacement = insertedBlock + "\n" + anchor;
+      }
     }
 
-    hunks.push({
-      old: deleted.join("\n"),
-      new: inserted.join("\n"),
-      line: startLine + 1,
-      atIndex: startIndex,
-      deleteCount: endIndex - startIndex,
-      insertText,
-      expectedText: oldText.slice(startIndex, endIndex),
-    });
-  }
+    return {
+      old: deletedLines.map(stripIndent).join("\n"),
+      new: insertedBlock,
+      line: oldStart + 1, // informational only — a best-effort label, not used for applying
+      findText,
+      replacement,
+    };
+  });
 
   return hunks;
 }
@@ -197,9 +282,6 @@ const riAutoModeBtn = document.getElementById("riAutoModeBtn");
 const riGridContainer = document.getElementById("riGridContainer");
 const riAutomationHint = document.getElementById("riAutomationHint");
 
-const debugRequest = document.getElementById("debugRequest");
-const debugResponse = document.getElementById("debugResponse");
-
 const staticTabBtn = document.getElementById("staticTabBtn");
 const dynamicTabBtn = document.getElementById("dynamicTabBtn");
 const staticToolsPanel = document.getElementById("staticToolsPanel");
@@ -207,6 +289,7 @@ const dynamicToolsPanel = document.getElementById("dynamicToolsPanel");
 
 const frFindInput = document.getElementById("frFindInput");
 const frReplaceInput = document.getElementById("frReplaceInput");
+const frCaseSensitiveCheckbox = document.getElementById("frCaseSensitiveCheckbox");
 const frFindBtn = document.getElementById("frFindBtn");
 const frPrevBtn = document.getElementById("frPrevBtn");
 const frNextBtn = document.getElementById("frNextBtn");
@@ -288,7 +371,6 @@ askBtn.addEventListener("click", async () => {
       expression: state.expression,
     };
     state.lastRequestPayload = payload;
-    debugRequest.textContent = JSON.stringify(payload, null, 2);
 
     askStatus.textContent = "Asking AI...";
     const response = await chrome.runtime.sendMessage({ type: "REQUEST_SUGGESTION", payload });
@@ -298,6 +380,24 @@ askBtn.addEventListener("click", async () => {
     }
 
     state.suggestion = response.data;
+
+    // The AI's raw output isn't guaranteed to have balanced brackets —
+    // auto-correct it here, before anything is displayed or diffed, so
+    // both Bulk mode and the section-by-section diff (computed FROM
+    // bulk_edit below) start from already-clean code.
+    if (state.suggestion.bulk_edit) {
+      const { text: fixedBulkEdit, fixCount } = autoFixBrackets(state.suggestion.bulk_edit);
+      if (fixCount > 0) {
+        state.suggestion.bulk_edit = fixedBulkEdit;
+        // Worded to avoid classifyValidationSeverity's "error" trigger
+        // words (e.g. "unmatched") — this is good news, already fixed,
+        // not an outstanding problem to flag red.
+        state.suggestion.validation = [
+          `[auto-fix] Automatically balanced ${fixCount} parenthesis/bracket/brace pair(s) in the generated code.`,
+          ...(Array.isArray(state.suggestion.validation) ? state.suggestion.validation : []),
+        ];
+      }
+    }
 
     // The real backend never produces a line-by-line diff of its own
     // (see computeLineDiff's header) — synthesize one from bulk_edit
@@ -309,12 +409,12 @@ askBtn.addEventListener("click", async () => {
       state.suggestion.line_by_line_edit = computeLineDiff(state.expression, state.suggestion.bulk_edit);
     }
 
-    debugResponse.textContent = JSON.stringify(state.suggestion, null, 2);
-
     state.mode = "bulk";
     state.lineStatus = (state.suggestion.line_by_line_edit || []).map(() => "pending");
     state.lineNavIndex = 0;
     state.ruleInputStatus = (state.suggestion.rule_input || []).map(() => "pending");
+    bulkExpanded = false;
+    lineEditsExpanded = false;
 
     askStatus.textContent = "";
     statusDot.classList.add("active");
@@ -433,25 +533,56 @@ lineModeBtn.addEventListener("click", () => {
   highlightCurrentLineEdit();
 });
 
+const PREVIEW_LINE_COUNT = 3;
+let bulkExpanded = false;
+
+// Truncates to the first PREVIEW_LINE_COUNT lines unless expanded or
+// already short enough to not need it.
+function previewLines(text, expanded) {
+  const lines = text.split("\n");
+  if (expanded || lines.length <= PREVIEW_LINE_COUNT) {
+    return { text, truncated: false };
+  }
+  return { text: lines.slice(0, PREVIEW_LINE_COUNT).join("\n"), truncated: true };
+}
+
 function renderBulkEdit() {
+  const oldPreview = previewLines(state.expression, bulkExpanded);
+  const newPreview = previewLines(state.suggestion.bulk_edit, bulkExpanded);
+  const hasMore = oldPreview.truncated || newPreview.truncated || bulkExpanded;
+
   editsContainer.innerHTML = `
     <div class="diff-card">
-      <div class="diff-old">${escapeHtml(state.expression)}</div>
-      <div class="diff-new">${escapeHtml(state.suggestion.bulk_edit)}</div>
+      <div class="diff-old">${escapeHtml(oldPreview.text)}${oldPreview.truncated ? "\n…" : ""}</div>
+      <div class="diff-new">${escapeHtml(newPreview.text)}${newPreview.truncated ? "\n…" : ""}</div>
+      ${hasMore ? `<button class="btn btn-expand" id="bulkExpandBtn">${bulkExpanded ? "Show less" : "Show all …"}</button>` : ""}
       <div class="diff-actions">
-        <button class="btn btn-accept" id="bulkAcceptBtn">Accept</button>
-        <button class="btn btn-reject" id="bulkRejectBtn">Reject</button>
+        <button class="btn btn-accept" id="bulkAcceptBtn"><i class="icon">✓</i> Accept</button>
+        <button class="btn btn-reject" id="bulkRejectBtn"><i class="icon">✕</i> Reject</button>
       </div>
       <p class="hint" id="bulkResult"></p>
     </div>
   `;
 
+  const expandBtn = document.getElementById("bulkExpandBtn");
+  if (expandBtn) {
+    expandBtn.addEventListener("click", () => {
+      bulkExpanded = !bulkExpanded;
+      renderBulkEdit();
+    });
+  }
+
   document.getElementById("bulkAcceptBtn").addEventListener("click", async () => {
     const resultEl = document.getElementById("bulkResult");
     resultEl.textContent = "Applying...";
     const result = await sendToContentScript("APPLY_BULK_EDIT", { text: state.suggestion.bulk_edit });
-    resultEl.textContent = result.success ? "Applied." : "Error: " + result.error;
-    if (result.success) await refreshEditorState();
+    if (result.success) {
+      await refreshEditorState();
+      await autoResolveLiveBrackets();
+      resultEl.textContent = "Applied.";
+    } else {
+      resultEl.textContent = "Error: " + result.error;
+    }
   });
 
   document.getElementById("bulkRejectBtn").addEventListener("click", () => {
@@ -463,6 +594,40 @@ function renderBulkEdit() {
 // Replace's match navigation does, highlighting each edit's location in
 // the editor (via a search for edit.old's text) before you accept it —
 // so you can see exactly what's about to change, one at a time.
+let lineEditsExpanded = false;
+
+// Cursor-style model: the full set of sections is fixed once (computed
+// exactly once, right after the AI response arrives) and never removed
+// or reshuffled. Every section stays browsable forever via ▲/▼
+// regardless of its status — reject really does mean "no change, come
+// back anytime," and even an already-accepted section can still be
+// navigated to (it'll highlight where the change landed instead of
+// where it used to be). "pending" | "accepted" | "rejected".
+function lineEditCardHtml(edit, i) {
+  const status = state.lineStatus[i];
+  const isCurrent = i === state.lineNavIndex ? " diff-current" : "";
+  const actionsHtml =
+    status === "accepted"
+      ? '<span class="status-pill status-pill-accepted"><i class="icon">✓</i> Accepted</span>'
+      : status === "rejected"
+        ? `<span class="status-pill status-pill-rejected"><i class="icon">–</i> Skipped</span>
+           <div class="diff-actions">
+             <button class="btn btn-accept" data-action="accept" data-index="${i}"><i class="icon">✓</i> Accept anyway</button>
+           </div>`
+        : `<div class="diff-actions">
+             <button class="btn btn-accept" data-action="accept" data-index="${i}"><i class="icon">✓</i> Accept</button>
+             <button class="btn btn-reject" data-action="reject" data-index="${i}"><i class="icon">✕</i> Reject</button>
+           </div>`;
+
+  return `
+    <div class="diff-card ${status !== "pending" ? "diff-resolved" : ""}${isCurrent}" data-index="${i}">
+      <div class="diff-old">${escapeHtml(edit.old)}</div>
+      <div class="diff-new">${escapeHtml(edit.new)}</div>
+      ${actionsHtml}
+    </div>
+  `;
+}
+
 function renderLineEdits() {
   const edits = state.suggestion.line_by_line_edit;
   if (state.lineNavIndex >= edits.length) state.lineNavIndex = 0;
@@ -470,38 +635,34 @@ function renderLineEdits() {
   const navHtml =
     edits.length > 1
       ? `<div class="fr-nav">
-           <button class="btn fr-nav-btn" id="lineNavPrevBtn" title="Previous edit">&#9650;</button>
-           <span class="hint">Edit ${state.lineNavIndex + 1} of ${edits.length}</span>
-           <button class="btn fr-nav-btn" id="lineNavNextBtn" title="Next edit">&#9660;</button>
+           <button class="btn fr-nav-btn" id="lineNavPrevBtn" title="Previous section">&#9650;</button>
+           <span class="hint">Section ${state.lineNavIndex + 1} of ${edits.length}</span>
+           <button class="btn fr-nav-btn" id="lineNavNextBtn" title="Next section">&#9660;</button>
          </div>`
       : "";
 
-  const cardsHtml = edits
-    .map((edit, i) => {
-      const status = state.lineStatus[i];
-      const isCurrent = i === state.lineNavIndex ? " diff-current" : "";
-      return `
-        <div class="diff-card ${status !== "pending" ? "diff-resolved" : ""}${isCurrent}" data-index="${i}">
-          <div class="diff-old">${escapeHtml(edit.old)}</div>
-          <div class="diff-new">${escapeHtml(edit.new)}</div>
-          ${
-            status === "pending"
-              ? `<div class="diff-actions">
-                   <button class="btn btn-accept" data-action="accept" data-index="${i}">Accept</button>
-                   <button class="btn btn-reject" data-action="reject" data-index="${i}">Reject</button>
-                 </div>`
-              : `<p class="hint">${status === "accepted" ? "Accepted." : "Rejected."}</p>`
-          }
-        </div>
-      `;
-    })
-    .join("");
+  const expandBtnHtml =
+    edits.length > 1
+      ? `<button class="btn btn-expand" id="lineExpandBtn">${
+          lineEditsExpanded ? "Show one at a time" : `Show all ${edits.length} …`
+        }</button>`
+      : "";
 
-  editsContainer.innerHTML = navHtml + cardsHtml;
+  // One card at a time by default (the current ▲/▼ position) — Expand
+  // reveals the full list, same pattern as the bulk-edit preview.
+  const cardsHtml = lineEditsExpanded
+    ? edits.map((edit, i) => lineEditCardHtml(edit, i)).join("")
+    : lineEditCardHtml(edits[state.lineNavIndex], state.lineNavIndex);
+
+  editsContainer.innerHTML = navHtml + expandBtnHtml + cardsHtml;
 
   if (edits.length > 1) {
     document.getElementById("lineNavPrevBtn").addEventListener("click", () => navigateLineEdit(-1));
     document.getElementById("lineNavNextBtn").addEventListener("click", () => navigateLineEdit(1));
+    document.getElementById("lineExpandBtn").addEventListener("click", () => {
+      lineEditsExpanded = !lineEditsExpanded;
+      renderLineEdits();
+    });
   }
 
   editsContainer.querySelectorAll("[data-action]").forEach((btn) => {
@@ -518,45 +679,54 @@ function renderLineEdits() {
 
       btn.disabled = true;
 
-      if (edit.atIndex !== undefined) {
-        // computeLineDiff hunks' offsets are all computed once against
-        // the expression as it stood before ANY hunk was applied — the
-        // moment one gets accepted, every hunk that comes after it in
-        // the document has a stale atIndex, which is exactly what threw
-        // "expression changed since the check ran" on the second Accept.
-        // Same fix as the parenthesis checker: after applying, recompute
-        // the whole diff fresh against the live document instead of
-        // trying to patch up stale offsets — a hunk that's now fully
-        // applied simply won't show up in the new diff at all.
-        const result = await sendToContentScript("APPLY_MULTI_CHAR_EDITS", { edits: [edit] });
-        if (!result.success) {
-          alert("Error applying edit: " + result.error); // eslint-disable-line no-alert
-          renderLineEdits();
-          return;
-        }
-        await refreshEditorState();
-        state.suggestion.line_by_line_edit = state.suggestion.bulk_edit
-          ? computeLineDiff(state.expression, state.suggestion.bulk_edit)
-          : [];
-        state.lineStatus = state.suggestion.line_by_line_edit.map(() => "pending");
-        state.lineNavIndex = 0;
-        renderSuggestion();
-        await highlightCurrentLineEdit();
+      // Backend-provided { old, new } (if a future backend ever sends a
+      // real diff) falls back to using old/new directly as the search
+      // text — findText/replacement (computeLineDiff's own hunks) are
+      // preferred since they're already indentation-normalized and, for
+      // pure insertions, anchored on real surrounding context.
+      const findText = edit.findText ?? edit.old;
+      const replacement = edit.replacement ?? edit.new;
+
+      const result = await sendToContentScript("APPLY_TEXT_REPLACEMENT", { findText, replacement });
+      if (!result.success) {
+        alert("Error applying edit: " + result.error); // eslint-disable-line no-alert
+        btn.disabled = false;
         return;
       }
 
-      // Legacy path — a real backend-provided { old, new } diff with no
-      // precomputed offsets, applied via substring search.
-      const result = await sendToContentScript("APPLY_LINE_EDIT", { old: edit.old, new: edit.new });
-      if (result.success) {
-        state.lineStatus[i] = "accepted";
-        await refreshEditorState();
-      } else {
-        alert("Error applying edit: " + result.error); // eslint-disable-line no-alert
+      state.lineStatus[i] = "accepted";
+      await refreshEditorState();
+      // Only once every section has been decided — not after each
+      // individual accept. The document is intentionally in a partial,
+      // in-between state until then; running the bracket fixer against
+      // that transient state treats it as final and can rewrite
+      // characters a still-pending section's search depends on. That's
+      // an extra, unnecessary touch of code exactly like the borrowed-
+      // anchor overlap above — same principle, different mechanism.
+      if (state.lineStatus.every((s) => s !== "pending")) {
+        await autoResolveLiveBrackets();
       }
-      renderLineEdits();
+      advanceToNextPendingSection();
+      renderSuggestion();
+      await highlightCurrentLineEdit();
     });
   });
+}
+
+// Moves lineNavIndex to the next "pending" section after an accept —
+// nice default flow (keep moving forward through what's left to
+// decide), without preventing ▲/▼ from freely visiting anything,
+// accepted or rejected included.
+function advanceToNextPendingSection() {
+  const edits = state.suggestion.line_by_line_edit;
+  for (let step = 1; step <= edits.length; step++) {
+    const idx = (state.lineNavIndex + step) % edits.length;
+    if (state.lineStatus[idx] === "pending") {
+      state.lineNavIndex = idx;
+      return;
+    }
+  }
+  // Nothing left pending — leave lineNavIndex where it is.
 }
 
 async function navigateLineEdit(delta) {
@@ -583,14 +753,17 @@ async function highlightCurrentLineEdit() {
   }
 
   const edit = edits[state.lineNavIndex];
-  // computeLineDiff hunks carry an exact line number; fall back to a
-  // text search only for edits that don't (e.g. a real line-by-line
-  // diff a future backend might send with just { old, new }).
-  if (edit.line != null) {
-    await sendToContentScript("HIGHLIGHT_LINE", { line: edit.line });
-  } else {
-    await sendToContentScript("HIGHLIGHT_TEXT_LOCATION", { text: edit.old });
-  }
+  const status = state.lineStatus[state.lineNavIndex];
+  // Search-based, same as the apply path — self-correcting regardless
+  // of what else has changed. An already-accepted section's "before"
+  // text is gone (it's been replaced), so highlight where the change
+  // actually landed instead; anything still pending/rejected hasn't
+  // changed yet, so highlight what it would replace.
+  const searchText = status === "accepted" ? (edit.replacement ?? edit.new) : (edit.findText ?? edit.old);
+  // Not surfaced as an error if this comes back unsuccessful (e.g. the
+  // anchor text for a pure insertion no longer matches) — just leaves
+  // whatever was highlighted before in place rather than clearing it.
+  await sendToContentScript("HIGHLIGHT_TEXT_LOCATION", { text: searchText });
 }
 
 // ─── Rendering: rule input changes (grid + per-row Accept in bulk mode) ─
@@ -743,19 +916,6 @@ function renderRuleInputGrid() {
   });
 }
 
-// ─── Dev Test: exercises the real chrome.debugger write path directly ─
-
-document.getElementById("testEditBtn").addEventListener("click", async () => {
-  const resultEl = document.getElementById("testEditResult");
-  const text = document.getElementById("testEditInput").value;
-  resultEl.textContent = "Sending...";
-  try {
-    const result = await sendToContentScript("APPLY_BULK_EDIT", { text });
-    resultEl.textContent = JSON.stringify(result, null, 2);
-  } catch (err) {
-    resultEl.textContent = "Error: " + err.message;
-  }
-});
 
 // ─── Top-level tabs ─────────────────────────────────────────────────
 
@@ -807,7 +967,10 @@ frFindBtn.addEventListener("click", async () => {
   frMatchStatus.textContent = "Searching...";
   frStatus.textContent = "";
   try {
-    const result = await sendToContentScript("FIND_MATCHES", { find });
+    const result = await sendToContentScript("FIND_MATCHES", {
+      find,
+      caseSensitive: frCaseSensitiveCheckbox.checked,
+    });
     if (!result.success) {
       frMatches = [];
       frCurrentIndex = -1;
@@ -864,7 +1027,12 @@ frReplaceBtn.addEventListener("click", async () => {
   frReplaceBtn.disabled = true;
   frStatus.textContent = "Replacing...";
   try {
-    const result = await sendToContentScript("APPLY_REPLACE_AT_INDEX", { atIndex, find, replace });
+    const result = await sendToContentScript("APPLY_REPLACE_AT_INDEX", {
+      atIndex,
+      find,
+      replace,
+      caseSensitive: frCaseSensitiveCheckbox.checked,
+    });
     if (!result.success) {
       frStatus.textContent = "Error: " + result.error;
     } else {
@@ -894,7 +1062,12 @@ frReplaceAllBtn.addEventListener("click", async () => {
   frReplaceAllBtn.disabled = true;
   frStatus.textContent = "Replacing all...";
   try {
-    const result = await sendToContentScript("APPLY_FIND_REPLACE_ALL", { find, replace, highlight: true });
+    const result = await sendToContentScript("APPLY_FIND_REPLACE_ALL", {
+      find,
+      replace,
+      highlight: true,
+      caseSensitive: frCaseSensitiveCheckbox.checked,
+    });
     frStatus.textContent = result.success ? `Replaced ${result.count} occurrence(s).` : "Error: " + result.error;
     if (result.success) await refreshEditorState();
   } catch (err) {
@@ -1002,6 +1175,56 @@ function computeBracketRepairPlan(tokens) {
   }
 
   return merged;
+}
+
+// Applies a computeBracketRepairPlan plan directly to a plain string —
+// no live editor involved. Used to auto-correct the AI's raw response
+// before it's ever shown or typed anywhere (see autoFixBrackets below),
+// as distinct from the Static Tools checker's version of this same plan
+// shape, which applies to the live Appian editor via keystrokes.
+function applyBracketRepairPlanToString(text, edits) {
+  const resolved = edits.map((edit) => ({ ...edit, atIndex: edit.atEnd ? text.length : edit.atIndex }));
+  const sorted = resolved.slice().sort((a, b) => b.atIndex - a.atIndex);
+  let result = text;
+  for (const edit of sorted) {
+    const end = edit.atIndex + (edit.deleteCount || 0);
+    result = result.slice(0, edit.atIndex) + (edit.insertText || "") + result.slice(end);
+  }
+  return result;
+}
+
+// Auto-balances parentheses/brackets/braces in a generated expression
+// before it's shown to the user or diffed against the original — the
+// AI's raw output isn't guaranteed to be syntactically balanced, and
+// fixing it here means both Bulk mode and the section-by-section diff
+// (which is computed FROM this corrected text) start from clean code.
+// Returns { text, fixCount } so the caller can note what happened.
+function autoFixBrackets(text) {
+  if (!text || !text.trim()) return { text, fixCount: 0 };
+  const tokens = new Tokenizer(text).tokenize();
+  const plan = computeBracketRepairPlan(tokens);
+  if (plan.length === 0) return { text, fixCount: 0 };
+  return { text: applyBracketRepairPlanToString(text, plan), fixCount: plan.length };
+}
+
+// Same idea as autoFixBrackets, but against the LIVE Appian editor
+// instead of a plain string — run automatically right after a Bulk or
+// (fully-applied) section-by-section edit lands, the same fix the user
+// was otherwise having to trigger by hand via the Static Tools
+// Parenthesis Checker's "Resolve All" every time. Typing can introduce
+// drift even with auto-close-bracket suppression, so pre-fixing the raw
+// AI text (autoFixBrackets) alone isn't always enough. Only call this
+// when no other precomputed edits are still pending against the live
+// document — it applies its own edits via a fresh read, which would
+// invalidate any other still-pending offsets.
+async function autoResolveLiveBrackets() {
+  const { expression } = await refreshEditorState();
+  if (!expression || !expression.trim()) return;
+  const tokens = new Tokenizer(expression).tokenize();
+  const plan = computeBracketRepairPlan(tokens);
+  if (plan.length === 0) return;
+  const result = await sendToContentScript("APPLY_MULTI_CHAR_EDITS", { edits: plan });
+  if (result.success) await refreshEditorState();
 }
 
 function describeParenEdit(edit) {
