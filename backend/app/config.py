@@ -18,12 +18,17 @@ class Settings(BaseSettings):
     appian_docs_url: str = "https://appian-docs-api.mcp.kapa.ai"
     appian_docs_token: str = ""
 
-    # Google Gemini AI (AI Studio)
-    gemini_api_key: str = ""
-    gemini_model: str = "gemini-3.6-flash"
+    # Anthropic Claude API
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-opus-5"
 
     # System prompt — path to the master SAIL agent prompt file
     system_prompt_path: str = _DEFAULT_PROMPT_PATH
+
+    # Prompt context caps (chars). Claude's context window is far larger than
+    # these, so they're mainly a latency/cost/noise control, not a hard limit.
+    docs_context_max_chars: int = 24000
+    app_context_max_chars: int = 12000
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

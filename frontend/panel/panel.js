@@ -14,9 +14,13 @@
  *     line_by_line_edit:    [{ old: string, new: string }]
  *     validation:           string[] — diagnostics on the generated
  *                           `bulk_edit`, tagged "[syntax] ..." (a local
- *                           bracket-balance check that always runs) and,
- *                           when available, "[docs] ..." (functions/
- *                           components checked against Appian's Docs MCP).
+ *                           bracket-balance check plus notes on any known
+ *                           deprecated parameter values that were
+ *                           auto-corrected, e.g. style: "PRIMARY" ->
+ *                           style: "SOLID" — both always run, no live
+ *                           connection needed) and, when available,
+ *                           "[docs] ..." (functions/components checked
+ *                           against Appian's Docs MCP).
  *     docsValidationRan:    bool — whether the Docs MCP check actually
  *                           ran, vs. only the local syntax check.
  *   ruleInputObj: { name, description, type, array }
@@ -354,6 +358,15 @@ async function refreshEditorState() {
 
 // ─── Ask AI ─────────────────────────────────────────────────────────
 
+// Auto-grow the composer textarea as you type, capped by the max-height
+// set in panel.css (overflow scrolls beyond that) — same feel as
+// claude.ai's input box.
+function autoGrowPrompt() {
+  promptInput.style.height = "auto";
+  promptInput.style.height = `${promptInput.scrollHeight}px`;
+}
+promptInput.addEventListener("input", autoGrowPrompt);
+
 askBtn.addEventListener("click", async () => {
   const prompt = promptInput.value.trim();
   if (!prompt) return;
@@ -416,6 +429,9 @@ askBtn.addEventListener("click", async () => {
     bulkExpanded = false;
     lineEditsExpanded = false;
 
+    promptInput.value = "";
+    autoGrowPrompt();
+
     askStatus.textContent = "";
     statusDot.classList.add("active");
     renderSuggestion();
@@ -431,10 +447,13 @@ askBtn.addEventListener("click", async () => {
 //
 // `validation` is a combined list of diagnostics on the AI's generated
 // `bulk_edit`, tagged by source:
-//   "[syntax] ..." — a local, string-aware bracket-balance check
-//     (backend/app/syntax_check.py) that always runs, no live Appian
-//     connection needed. Catches structural mistakes like an unclosed
-//     "{" from a truncated a!richTextItem list.
+//   "[syntax] ..." — local, no-live-connection checks (backend/app/
+//     syntax_check.py) that always run: a string-aware bracket-balance
+//     check (catches structural mistakes like an unclosed "{" from a
+//     truncated a!richTextItem list) plus notes on any known-deprecated
+//     parameter value that got auto-corrected before this code was
+//     returned (e.g. style: "PRIMARY" -> style: "SOLID") — these are
+//     informational, the fix is already applied to `bulk_edit`.
 //   "[docs] ..." — functions/components referenced in the code checked
 //     against Appian's Docs MCP. This is what catches things the AI can
 //     still hallucinate despite the docs context (e.g. a function name
@@ -576,13 +595,13 @@ function renderBulkEdit() {
     const resultEl = document.getElementById("bulkResult");
     resultEl.textContent = "Applying...";
     const result = await sendToContentScript("APPLY_BULK_EDIT", { text: state.suggestion.bulk_edit });
-    if (result.success) {
-      await refreshEditorState();
-      await autoResolveLiveBrackets();
-      resultEl.textContent = "Applied.";
-    } else {
+    if (!result.success) {
       resultEl.textContent = "Error: " + result.error;
+      return;
     }
+    await refreshEditorState();
+    const repairNote = await autoResolveLiveBrackets();
+    resultEl.textContent = "Applied." + repairNote;
   });
 
   document.getElementById("bulkRejectBtn").addEventListener("click", () => {
@@ -608,7 +627,10 @@ function lineEditCardHtml(edit, i) {
   const isCurrent = i === state.lineNavIndex ? " diff-current" : "";
   const actionsHtml =
     status === "accepted"
-      ? '<span class="status-pill status-pill-accepted"><i class="icon">✓</i> Accepted</span>'
+      ? `<span class="status-pill status-pill-accepted"><i class="icon">✓</i> Accepted</span>
+         <div class="diff-actions">
+           <button class="btn btn-accept" data-action="accept" data-index="${i}"><i class="icon">✓</i> Accept again</button>
+         </div>`
       : status === "rejected"
         ? `<span class="status-pill status-pill-rejected"><i class="icon">–</i> Skipped</span>
            <div class="diff-actions">
@@ -684,8 +706,12 @@ function renderLineEdits() {
       // text — findText/replacement (computeLineDiff's own hunks) are
       // preferred since they're already indentation-normalized and, for
       // pure insertions, anchored on real surrounding context.
-      const findText = edit.findText ?? edit.old;
       const replacement = edit.replacement ?? edit.new;
+      // Re-accepting an already-accepted section: the editor already
+      // has `replacement` in place (not the original `old`), so search
+      // for that instead — otherwise the find comes up empty and the
+      // "Accept again" click errors out on a no-op.
+      const findText = state.lineStatus[i] === "accepted" ? replacement : (edit.findText ?? edit.old);
 
       const result = await sendToContentScript("APPLY_TEXT_REPLACEMENT", { findText, replacement });
       if (!result.success) {
@@ -1213,18 +1239,30 @@ function autoFixBrackets(text) {
 // was otherwise having to trigger by hand via the Static Tools
 // Parenthesis Checker's "Resolve All" every time. Typing can introduce
 // drift even with auto-close-bracket suppression, so pre-fixing the raw
-// AI text (autoFixBrackets) alone isn't always enough. Only call this
-// when no other precomputed edits are still pending against the live
-// document — it applies its own edits via a fresh read, which would
-// invalidate any other still-pending offsets.
+// AI text (autoFixBrackets) alone isn't always enough — the paste itself,
+// not just the AI's output, is a known source of stray brackets: Appian's
+// own editor behavior during a simulated whole-document retype has been
+// confirmed to occasionally add/drop a bracket in ways that aren't fully
+// prevented by disabling autoCloseBrackets (see cdp-typer.js's
+// replaceAllText header). Only call this when no other precomputed edits
+// are still pending against the live document — it applies its own edits
+// via a fresh read, which would invalidate any other still-pending
+// offsets. Returns a short status suffix describing what happened, or ""
+// if the result was already balanced.
 async function autoResolveLiveBrackets() {
   const { expression } = await refreshEditorState();
-  if (!expression || !expression.trim()) return;
+  if (!expression || !expression.trim()) return "";
+
   const tokens = new Tokenizer(expression).tokenize();
   const plan = computeBracketRepairPlan(tokens);
-  if (plan.length === 0) return;
+  if (plan.length === 0) return "";
+
   const result = await sendToContentScript("APPLY_MULTI_CHAR_EDITS", { edits: plan });
-  if (result.success) await refreshEditorState();
+  if (!result.success) {
+    return ` (Found ${plan.length} paren issue(s) introduced while pasting but couldn't auto-fix: ${result.error} — check the Parenthesis Checker tool.)`;
+  }
+  await refreshEditorState();
+  return ` (Auto-fixed ${plan.length} paren issue(s) introduced while pasting.)`;
 }
 
 function describeParenEdit(edit) {

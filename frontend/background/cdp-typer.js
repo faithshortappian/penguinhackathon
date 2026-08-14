@@ -216,6 +216,18 @@ async function dispatchText(tabId, text) {
   }
 }
 
+/**
+ * Dispatches a real Backspace keystroke — used to delete an active
+ * selection as its own committed edit, rather than relying on the first
+ * character of a subsequent type-over to replace it (see replaceAllText's
+ * header for why that distinction matters).
+ */
+async function deleteSelection(tabId) {
+  const params = { key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 };
+  await sendCommand(tabId, "Input.dispatchKeyEvent", { type: "rawKeyDown", ...params });
+  await sendCommand(tabId, "Input.dispatchKeyEvent", { type: "keyUp", ...params });
+}
+
 async function dispatchClick(tabId, x, y) {
   await sendCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
   await sendCommand(tabId, "Input.dispatchMouseEvent", {
@@ -300,9 +312,21 @@ export async function typeText(tabId, text) {
 
 /**
  * Attaches the debugger, selects all content in whatever element
- * currently has focus (real Cmd/Ctrl+A), types `text` over that
- * selection character-by-character, then detaches. Caller is
- * responsible for focusing the target element before calling this.
+ * currently has focus (real Cmd/Ctrl+A), deletes it with a real
+ * Backspace, then types `text` into the now-empty document
+ * character-by-character, then detaches. Caller is responsible for
+ * focusing the target element before calling this.
+ *
+ * The delete is its own explicit keystroke rather than letting the first
+ * typed character replace the selection — confirmed live (see the same
+ * finding documented on replaceRangesText below) that typing directly
+ * over an active selection gives Appian's bracket-closing behavior a
+ * chance to fire on that first character in a way that isn't fully
+ * gated by the autoCloseBrackets option, producing a stray extra ")" on
+ * effectively every whole-document replace. Deleting first, as its own
+ * committed edit, means every subsequent character — including the
+ * first "(" of the new text — is typed into a clean position rather
+ * than over a selection.
  */
 export async function replaceAllText(tabId, text) {
   return withDebugger(tabId, async () => {
@@ -310,6 +334,7 @@ export async function replaceAllText(tabId, text) {
     await setEnterAutoIndent(tabId, false);
     try {
       await selectAll(tabId);
+      await deleteSelection(tabId);
       await dispatchText(tabId, text);
       await settle();
     } finally {
@@ -365,9 +390,7 @@ async function applyOneRangeEdit(tabId, range, text) {
     // A selection alone doesn't delete anything — a real Backspace
     // does, consistent with this file only ever mutating the document
     // via genuine keystrokes rather than a JS API call.
-    const params = { key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 };
-    await sendCommand(tabId, "Input.dispatchKeyEvent", { type: "rawKeyDown", ...params });
-    await sendCommand(tabId, "Input.dispatchKeyEvent", { type: "keyUp", ...params });
+    await deleteSelection(tabId);
   } else {
     await dispatchText(tabId, text);
   }
