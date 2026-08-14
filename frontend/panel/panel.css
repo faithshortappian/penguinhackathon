@@ -885,22 +885,51 @@ textarea::placeholder,
 }
 
 .composer-row {
+  position: relative;
   display: flex;
-  align-items: flex-end;
-  gap: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  background: var(--surface-alt);
+  padding: 10px 52px 44px 11px;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease), background 0.15s var(--ease);
+}
+
+.composer-row:focus-within {
+  border-color: var(--primary);
+  background: var(--surface);
+  box-shadow: var(--ring-primary);
 }
 
 .composer-row textarea {
   flex: 1;
+  max-height: 160px;
   margin-bottom: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  resize: none;
+}
+
+.composer-row textarea:focus {
+  outline: none;
+  border: none;
+  background: transparent;
+  box-shadow: none;
 }
 
 #askBtn {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
   margin-top: 0;
   flex-shrink: 0;
-  padding: 10px 18px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 50%;
   background: linear-gradient(135deg, var(--primary) 0%, var(--primary-strong) 100%);
   box-shadow: 0 2px 8px rgba(91, 82, 243, 0.35);
+  font-size: 14px;
 }
 
 #askBtn:hover:not(:disabled) {

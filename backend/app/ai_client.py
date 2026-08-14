@@ -1,12 +1,12 @@
-"""AI client using Google Gemini Interactions API for SAIL code processing."""
+"""AI client using the Anthropic Claude API for SAIL code processing."""
 
 import json
 import logging
 import re
 from pathlib import Path
-from google import genai
+import anthropic
 from app.config import get_settings
-from app.syntax_check import check_balanced_brackets
+from app.syntax_check import check_balanced_brackets, fix_deprecated_values
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +34,12 @@ def _load_master_prompt() -> str:
 
 
 class AIClient:
-    """Handles LLM interactions via Google Gemini (AI Studio)."""
+    """Handles LLM interactions via the Anthropic Claude API."""
 
     def __init__(self):
         settings = get_settings()
-        self.client = genai.Client(api_key=settings.gemini_api_key)
-        self.model = settings.gemini_model
+        self.client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        self.model = settings.anthropic_model
 
     def _build_system_prompt(self, docs_context: str, app_context: str) -> str:
         """Build the system prompt combining the master SAIL prompt with live context."""
@@ -95,7 +95,10 @@ You have access to the following context:
 When responding:
 1. Always return valid SAIL code.
 2. Reference existing rule!, const!, and recordType! objects from the app context when appropriate.
-3. Follow Appian best practices for performance and readability.
+3. Follow Appian best practices for performance, readability, and — when
+   <appian_docs> includes SAIL design inspiration/best-practices guidance —
+   interface layout, visual hierarchy, and component choice. Prefer that
+   guidance over generic web-design instinct.
 4. Explain what you changed in the summary.
 5. If the user provides rule inputs, incorporate them correctly using ri! references.
 
@@ -110,6 +113,7 @@ Grounding discipline:
 - Only reference SAIL functions, components, or parameters that either appear in <appian_docs> below or that you are highly confident are core, stable Appian SAIL syntax.
 - If <appian_docs> is empty or does not cover something you need, say so explicitly in the summary (e.g. "no documentation was found for X, verify usage") rather than inventing behavior.
 - Do not fabricate rule!, const!, or recordType! names that are not present in <app_context> — if a needed object doesn't exist there, note in the summary that it needs to be created.
+- For parameters that take a fixed set of string values (e.g. a component's `style`, `size`, or `align`), use the exact value spelling shown in <appian_docs> for that component even if it conflicts with a value you recall from training — Appian has renamed enum values across releases (e.g. older "PRIMARY"/"SECONDARY" button styles are now "SOLID"/"OUTLINE"/"LINK"), and <appian_docs> reflects the current release.
 {response_format}"""
 
     _RESPONSE_SCHEMA = {
@@ -126,10 +130,12 @@ Grounding discipline:
                         "type": {"type": "string"},
                     },
                     "required": ["name", "type"],
+                    "additionalProperties": False,
                 },
             },
         },
         "required": ["summary", "code", "ruleInputs"],
+        "additionalProperties": False,
     }
 
     def _build_user_message(self, code: str, prompt: str, rule_inputs: list[dict]) -> str:
@@ -172,20 +178,20 @@ Grounding discipline:
         system_prompt = self._build_system_prompt(docs_context, app_context)
         user_message = self._build_user_message(code, prompt, rule_inputs)
 
-        full_input = f"{system_prompt}\n\n---\n\n{user_message}"
-
         try:
-            interaction = self.client.interactions.create(
+            message = self.client.messages.create(
                 model=self.model,
-                input=full_input,
-                response_format={
-                    "type": "text",
-                    "mime_type": "application/json",
-                    "schema": self._RESPONSE_SCHEMA,
+                max_tokens=8192,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_message}],
+                output_config={
+                    "format": {"type": "json_schema", "schema": self._RESPONSE_SCHEMA}
                 },
             )
 
-            response_text = interaction.output_text
+            response_text = next(
+                block.text for block in message.content if block.type == "text"
+            )
 
             # Parse the JSON response
             # Strip potential markdown fences if model adds them despite instructions
@@ -200,12 +206,13 @@ Grounding discipline:
 
             result = json.loads(cleaned)
             final_code = result.get("code", code)
+            final_code, fix_notes = fix_deprecated_values(final_code)
 
             return {
                 "summary": result.get("summary", ""),
                 "code": final_code,
                 "ruleInputs": result.get("ruleInputs", rule_inputs),
-                "syntaxWarnings": check_balanced_brackets(final_code),
+                "syntaxWarnings": check_balanced_brackets(final_code) + fix_notes,
             }
 
         except json.JSONDecodeError:
@@ -221,15 +228,16 @@ Grounding discipline:
                     salvaged_code = None
 
             final_code = salvaged_code if salvaged_code else code
+            final_code, fix_notes = fix_deprecated_values(final_code)
 
             return {
                 "summary": "AI returned a response but it was not in the expected format.",
                 "code": final_code,
                 "ruleInputs": rule_inputs,
-                "syntaxWarnings": check_balanced_brackets(final_code),
+                "syntaxWarnings": check_balanced_brackets(final_code) + fix_notes,
             }
         except Exception as e:
-            raise RuntimeError(f"Gemini API error: {str(e)}") from e
+            raise RuntimeError(f"Anthropic API error: {str(e)}") from e
 
 
 # Singleton (reset on module reload)

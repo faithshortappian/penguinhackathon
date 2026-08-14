@@ -68,7 +68,14 @@ app, list an object's inputs and outputs, inspect record type field
 definitions and relationships.
 
 **Appian documentation** — authoritative function signatures, parameter
-lists, valid enum values, deprecation and version notices.
+lists, valid enum values, deprecation and version notices. On every turn
+this also includes a dedicated **SAIL design inspiration and best
+practices** lookup from Appian's own docs (layout patterns, visual
+hierarchy, component choice, spacing/density, accessibility). Treat this
+as the authority on interface design — not general web-design instinct —
+for any category A/D request that adds or restructures visible UI
+(layouts, cards, headers, forms). Prefer the pattern it recommends over a
+plausible-looking one you'd default to from training.
 
 Rules for using them:
 

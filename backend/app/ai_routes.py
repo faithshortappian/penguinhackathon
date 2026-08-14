@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from app.ai_client import get_ai_client
 from app.docs_client import get_docs_client
 from app.context_service import ContextService
+from app.config import get_settings
 
 logger = logging.getLogger("app.ai")
 
@@ -45,48 +46,73 @@ class ProcessResponse(BaseModel):
 # ─── Helper Functions ────────────────────────────────────────────
 
 async def _gather_docs_context(code: str, prompt: str) -> str:
-    """Query the Appian Docs MCP for relevant documentation based on the code/prompt."""
+    """Query the Appian Docs MCP for relevant documentation based on the code/prompt.
+
+    Runs two kinds of lookups in parallel:
+    - one broad search grounded in the user's prompt/intent
+    - one dedicated per-function/component lookup for each a!/rule!/etc.
+      reference in the code
+
+    The per-component lookups matter because a blended search query dilutes
+    component-specific detail (e.g. the exact accepted values for a
+    a!buttonWidget's `style` parameter) into a single generic result. Without
+    a dedicated lookup, that detail often doesn't make it into context at
+    all, and the model falls back on outdated training knowledge — which is
+    how stale enum values (e.g. "PRIMARY" instead of the current "SOLID")
+    end up in generated code despite the docs-grounding instructions.
+    """
     docs_client = get_docs_client()
     context_parts = []
 
-    # Build a search query from the prompt and code keywords
-    search_query = prompt if prompt else ""
-    if code:
-        # Extract function names from the code for doc lookups
-        import re
-        functions = re.findall(r'([a-z]![\w]+)', code)
-        if functions:
-            search_query += " " + " ".join(functions[:5])  # Limit to 5
+    functions = list(dict.fromkeys(re.findall(r'([a-z]![\w]+)', code))) if code else []
 
-    if not search_query.strip():
-        logger.info("docs_context: skipped (empty search query)")
-        return ""
+    search_query = (prompt or "").strip()
+    if functions:
+        search_query += " " + " ".join(functions[:5])
+    search_query = search_query.strip()[:200]
 
-    query = search_query.strip()[:200]
-    logger.info("docs_context: searching Appian docs for query=%r", query)
+    lookups: list[tuple[str, "asyncio.Future"]] = []
+    if search_query:
+        lookups.append(("search", docs_client.search(search_query)))
+    for name in functions[:8]:  # cap dedicated lookups per request
+        lookups.append((name, docs_client.get_function_docs(name)))
 
-    try:
-        # Search docs for relevant content
-        search_result = await docs_client.search(query)
-        if search_result and not search_result.get("isError"):
-            for part in search_result.get("content", []):
+    # Always pull Appian's SAIL design-inspiration/best-practices guidance
+    # (layout, visual hierarchy, component choice, accessibility) as its own
+    # dedicated lookup, same reasoning as the per-component lookups above: a
+    # blended search query dilutes it into a generic result and the model
+    # falls back on generic web-design instincts instead of Appian's actual
+    # design guidance.
+    lookups.append(
+        ("design_best_practices", docs_client.get_best_practices("SAIL interface design inspiration and best practices"))
+    )
+
+    logger.info(
+        "docs_context: running %d lookup(s) (search=%r, components=%s)",
+        len(lookups), search_query, functions[:8],
+    )
+
+    results = await asyncio.gather(*(coro for _, coro in lookups), return_exceptions=True)
+
+    for (label, _), result in zip(lookups, results):
+        if isinstance(result, BaseException):
+            logger.warning("docs_context: lookup %r failed: %s", label, result)
+            continue
+        if result and not result.get("isError"):
+            for part in result.get("content", []):
                 context_parts.append(part)
-            logger.info(
-                "docs_context: found %d result part(s) for query=%r",
-                len(context_parts),
-                query,
-            )
         else:
             logger.warning(
-                "docs_context: docs MCP returned an error for query=%r (result=%r)",
-                query,
-                search_result,
+                "docs_context: docs MCP returned an error for lookup=%r (result=%r)",
+                label, result,
             )
-    except Exception:
-        logger.exception("docs_context: docs MCP search failed for query=%r", query)
 
-    context = "\n\n".join(context_parts)[:8000]  # Cap context size
-    logger.info("docs_context: using %d chars of docs context", len(context))
+    max_chars = get_settings().docs_context_max_chars
+    context = "\n\n".join(context_parts)[:max_chars]  # Cap context size
+    logger.info(
+        "docs_context: using %d chars of docs context from %d/%d successful lookup(s)",
+        len(context), len(context_parts), len(lookups),
+    )
     return context
 
 
@@ -181,7 +207,8 @@ async def _gather_app_context(app_uuid: str | None) -> str:
             )
             parts.append(f"Interfaces:\n{ifaces_str}")
 
-        return "\n\n".join(parts)[:6000]  # Cap context size
+        max_chars = get_settings().app_context_max_chars
+        return "\n\n".join(parts)[:max_chars]  # Cap context size
 
     except Exception:
         return ""  # Non-critical — proceed without app context
